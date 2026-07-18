@@ -1,0 +1,28 @@
+[package]
+name = "tape-reed-solomon"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pure-Rust, SIMD-accelerated Reed-Solomon erasure coding over GF(2^8)"
+repository = "https://github.com/spool-labs/tape-reed-solomon"
+
+autobenches = false
+
+[features]
+# Default pins the full x86 build (GFNI + AVX-512); use --no-default-features
+# for runtime CPU dispatch, or another pin (e.g. avx2) for non-GFNI targets.
+default = ["gfni"]
+scalar = []
+ssse3 = []
+avx2 = []
+avx512 = []
+gfni = []
+neon = []
+
+[dependencies]
+
+[dev-dependencies]
+# Independent reference implementation for the wire-compatibility gate
+# (tests/parity.rs).
+reed-solomon-erasure = "6.0"
+rand = "0.8"

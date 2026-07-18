@@ -1,0 +1,19 @@
+# Same-run head-to-head incl. firedancer (x86-only C FFI). x86 only; kept separate
+# from bench-harness for that reason. [workspace] makes it standalone.
+[package]
+name = "fd-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tape-reed-solomon = { path = "../.." }
+reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
+sia_reed_solomon = { version = "0.3", default-features = false, features = ["simd"] }
+firedancer-reed-solomon = { git = "https://github.com/crypt0miester/firedancer-reed-solomon" }
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+
+[workspace]
