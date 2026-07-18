@@ -6,6 +6,7 @@
 #![cfg(target_arch = "x86_64")]
 
 use super::gfni::gfni_matrix;
+use super::scalar;
 use crate::galois;
 use core::arch::x86_64::*;
 
@@ -13,17 +14,10 @@ use core::arch::x86_64::*;
 /// pointers fit a stack array and encode needs no per-call heap allocation.
 const MAX_SHARDS: usize = 256;
 
-/// The GFNI affine broadcast (`i64`) for "multiply by `c`" — a thin re-export of
-/// `super::gfni::gfni_matrix` so callers can precompute and **cache** the
-/// per-coefficient matrices once (e.g. `ReedSolomon` builds them at construction),
-/// avoiding a `gfni_matrix` rebuild on every encode.
-pub fn affine_of(c: u8) -> i64 {
-    gfni_matrix(c)
-}
-
 /// Affine matrices (and raw coefficients) for a whole `NOUT x k` coefficient
 /// matrix, row-major. Held in memory deliberately so `vgf2p8affineqb` can fold
 /// the `set1_epi64` broadcast into its `m64bcst` operand.
+#[derive(Debug, Clone)]
 pub struct AffineMatrices {
     k: usize,
     coeffs: Vec<u8>,
@@ -40,6 +34,19 @@ impl AffineMatrices {
             coeffs: matrix.to_vec(),
             m: matrix.iter().map(|&c| gfni_matrix(c)).collect(),
         }
+    }
+
+    /// The row-major affine qwords, as the ymm kernel consumes them.
+    #[allow(dead_code)] // unused when a non-GFNI backend is pinned
+    #[inline(always)]
+    fn flat(&self) -> &[i64] {
+        &self.m
+    }
+
+    /// Number of output rows the tables cover.
+    #[inline(always)]
+    fn nout(&self) -> usize {
+        if self.k == 0 { 0 } else { self.coeffs.len() / self.k }
     }
 
     #[inline(always)]
@@ -130,15 +137,17 @@ pub unsafe fn dot_prod_gfni<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
         b += 128;
     }
 
-    // Tail (< 128 bytes): GF addition is XOR, so accumulation order is irrelevant.
+    // Tail (< 128 bytes): GF addition is XOR, so accumulation order does not
+    // matter. Straight through the scalar kernel, since at tail lengths a table
+    // row lookup beats rebuilding per-coefficient SIMD tables.
     if b < len {
         for j in 0..NOUT {
             for i in 0..k {
                 let cf = mats.coeff(base + j, i);
                 if i == 0 {
-                    super::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
+                    scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
                 } else {
-                    super::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
+                    scalar::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
                 }
             }
         }
@@ -183,6 +192,12 @@ impl NibbleTables {
             lo,
             hi,
         }
+    }
+
+    /// Number of output rows the tables cover
+    #[inline(always)]
+    fn nout(&self) -> usize {
+        if self.k == 0 { 0 } else { self.coeffs.len() / self.k }
     }
 
     #[inline(always)]
@@ -255,87 +270,94 @@ pub unsafe fn dot_prod_avx2<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
         b += 32;
     }
 
-    // Tail (< 32 bytes): GF addition is XOR, so accumulation order is irrelevant.
+    // Tail (< 32 bytes): GF addition is XOR, so accumulation order does not
+    // matter. Straight through the scalar kernel, since at tail lengths a table
+    // row lookup beats rebuilding per-coefficient SIMD tables.
     if b < len {
         for j in 0..NOUT {
             for i in 0..k {
                 let cf = tab.coeff(base + j, i);
                 if i == 0 {
-                    super::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
+                    scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
                 } else {
-                    super::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
+                    scalar::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
                 }
             }
         }
     }
 }
 
-/// Fused encode of all `m = parity.len()` outputs, tiling into `NOUT <= 6` passes:
-/// fused GFNI on GFNI+AVX-512, fused AVX2 on AVX2-only, else per-shard. All shards
-/// share one length; `gen_rows[o]` holds the `k` coefficients for output `o`.
+/// Fused encode of all outputs, tiling into passes of at most 6: fused GFNI on
+/// GFNI plus AVX-512, fused AVX2 on AVX2-only, else per-shard. All shards share
+/// one length and each generator row holds one coefficient per input. Builds
+/// the kernel tables per call; the cached-table entry point is
+/// `encode_with_tables`.
 pub fn encode<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     gen_rows: &[Rows],
     data: &[In],
     parity: &mut [Out],
 ) {
+    let m = parity.len();
+    let k = data.len();
     if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx512f") {
-        let m = parity.len();
-        let k = data.len();
-
         // Affine matrices for the whole m x k generator, built once per encode;
         // tiles view into it via a base output-row offset (no per-tile alloc).
         let mut flat = vec![0u8; m * k];
-        for o in 0..m {
-            let row = gen_rows[o].as_ref();
-            for i in 0..k {
-                flat[o * k + i] = row[i];
-            }
+        for (o, row) in gen_rows.iter().take(m).enumerate() {
+            flat[o * k..(o + 1) * k].copy_from_slice(&row.as_ref()[..k]);
         }
         let mats = AffineMatrices::new(&flat, m, k);
-
-        let mut o = 0usize;
-        while o < m {
-            let n = (m - o).min(6);
-            // SAFETY: gfni + avx512f just checked; shard-length / count invariants
-            // are the caller's contract (upheld by `encode_fused`).
-            unsafe {
-                match n {
-                    6 => run_tile::<6, _, _>(o, data, parity, &mats),
-                    5 => run_tile::<5, _, _>(o, data, parity, &mats),
-                    4 => run_tile::<4, _, _>(o, data, parity, &mats),
-                    3 => run_tile::<3, _, _>(o, data, parity, &mats),
-                    2 => run_tile::<2, _, _>(o, data, parity, &mats),
-                    _ => run_tile::<1, _, _>(o, data, parity, &mats),
-                }
-            }
-            o += n;
-        }
+        // SAFETY: gfni + avx512f just checked; `mats` covers all m x k;
+        // shard-length / count invariants are the caller's contract.
+        unsafe { encode_gfni_tiles(&mats, data, parity) };
     } else if is_x86_feature_detected!("avx2") {
-        // AVX2-only: fuse outputs; tables built per call here (the cached-table
-        // entry point is `encode_ymm_dispatch`).
-        let m = parity.len();
-        let k = data.len();
-
         let mut flat = vec![0u8; m * k];
-        for o in 0..m {
-            let row = gen_rows[o].as_ref();
-            for i in 0..k {
-                flat[o * k + i] = row[i];
-            }
+        for (o, row) in gen_rows.iter().take(m).enumerate() {
+            flat[o * k..(o + 1) * k].copy_from_slice(&row.as_ref()[..k]);
         }
         let tab = NibbleTables::new(&flat, m, k);
         // SAFETY: avx2 just checked; `tab` covers all m x k; shard-length / count
-        // invariants are the caller's contract (upheld by `encode_fused`).
+        // invariants are the caller's contract.
         unsafe { encode_avx2_tiles(&tab, data, parity) };
     } else {
-        // No SIMD at all (pre-AVX2 x86): correctness via the per-shard kernels.
+        // No SIMD at all (pre-SSSE3 x86): correctness via the per-shard kernels.
         encode_fallback(gen_rows, data, parity);
     }
 }
 
-/// Run the fused AVX2 path over all `parity.len()` outputs, tiling into `NOUT<=6`
-/// passes against `tab`. Shared by the per-call [`encode`] branch and the
-/// cached-table [`encode_ymm_dispatch`] path.
+/// Run the fused GFNI path over all outputs, tiling into passes of at most 6
+/// against cached affine matrices. The dot product handles any length (the
+/// sub-128-byte remainder falls through to its scalar tail), so this is the
+/// whole GFNI story for unspecialised shapes.
+///
+/// # Safety
+/// Caller guarantees gfni and avx512f, that `mats` covers all outputs over all
+/// inputs, and the equal-length shard contract.
+#[inline]
+unsafe fn encode_gfni_tiles<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    mats: &AffineMatrices,
+    data: &[In],
+    parity: &mut [Out],
+) {
+    let m = parity.len();
+    let mut o = 0usize;
+    while o < m {
+        let n = (m - o).min(6);
+        match n {
+            6 => run_tile::<6, _, _>(o, data, parity, mats),
+            5 => run_tile::<5, _, _>(o, data, parity, mats),
+            4 => run_tile::<4, _, _>(o, data, parity, mats),
+            3 => run_tile::<3, _, _>(o, data, parity, mats),
+            2 => run_tile::<2, _, _>(o, data, parity, mats),
+            _ => run_tile::<1, _, _>(o, data, parity, mats),
+        }
+        o += n;
+    }
+}
+
+/// Run the fused AVX2 path over all outputs, tiling into passes of at most 6
+/// against the nibble tables. Shared by the per-call encode branch and the
+/// cached-table entry point.
 ///
 /// # Safety
 /// Caller guarantees `avx2`, that `tab` covers all `parity.len()` outputs over
@@ -481,36 +503,52 @@ unsafe fn encode_ymm<const K: usize, const M: usize, In: AsRef<[u8]>, Out: AsMut
     }
 }
 
-/// Fused encode entry: cached GFNI/AVX2 kernels with runtime dispatch, or a
-/// pinned kernel when a backend feature is set.
+/// Fused encode entry for construction-time tables: cached GFNI/AVX2 kernels
+/// with runtime dispatch, or a pinned kernel when a backend feature is set.
+/// The affine matrices, nibble tables, and generator rows must all describe
+/// the same row-major coefficient matrix.
 #[allow(unused_variables)]
-pub fn encode_ymm_dispatch<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
-    affine: &[i64],
+pub fn encode_with_tables<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    mats: &AffineMatrices,
     nibbles: &NibbleTables,
     gen_rows: &[Rows],
     data: &[In],
     parity: &mut [Out],
 ) {
+    let (k, m) = (data.len(), parity.len());
+    let len = data.first().map(|s| s.as_ref().len()).unwrap_or(0);
+
+    // Everything below relies on these, and the kernels do unchecked reads.
+    assert!(mats.k == k && mats.nout() >= m, "affine tables do not cover the matrix");
+    assert!(nibbles.k == k && nibbles.nout() >= m, "nibble tables do not cover the matrix");
+    for shard in data {
+        assert_eq!(shard.as_ref().len(), len, "input shards must share one length");
+    }
+    for shard in parity.iter_mut() {
+        assert_eq!(shard.as_mut().len(), len, "parity shards must share one length");
+    }
+
     #[cfg(any(feature = "scalar", feature = "ssse3", feature = "avx512"))]
     return encode_fallback(gen_rows, data, parity);
     #[cfg(feature = "avx2")]
-    // SAFETY: the `avx2` feature pins a target that supports AVX2.
+    // SAFETY: the avx2 feature pins a target that supports AVX2; coverage and
+    // lengths asserted above.
     return unsafe { encode_avx2_tiles(nibbles, data, parity) };
     #[cfg(feature = "gfni")]
     {
-        let (k, m) = (data.len(), parity.len());
-        let len = data.first().map(|s| s.as_ref().len()).unwrap_or(0);
         if len >= 32 {
-            // SAFETY: the `gfni` feature pins a target with GFNI + AVX-512(VL).
+            // SAFETY: the gfni feature pins a target with GFNI plus AVX-512(VL);
+            // coverage and lengths asserted above.
             unsafe {
                 match (k, m) {
-                    (7, 13) => return encode_ymm::<7, 13, _, _>(affine, data, parity),
-                    (10, 10) => return encode_ymm::<10, 10, _, _>(affine, data, parity),
+                    (7, 13) => return encode_ymm::<7, 13, _, _>(mats.flat(), data, parity),
+                    (10, 10) => return encode_ymm::<10, 10, _, _>(mats.flat(), data, parity),
                     _ => {}
                 }
             }
         }
-        return encode(gen_rows, data, parity);
+        // SAFETY: as above; the tiled dot product covers any length via its tail.
+        return unsafe { encode_gfni_tiles(mats, data, parity) };
     }
 
     #[cfg(not(any(
@@ -521,31 +559,31 @@ pub fn encode_ymm_dispatch<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>
         feature = "gfni",
     )))]
     {
-        let (k, m) = (data.len(), parity.len());
-        let len = data.first().map(|s| s.as_ref().len()).unwrap_or(0);
         let specialised = is_x86_feature_detected!("gfni")
             && is_x86_feature_detected!("avx512vl")
             && is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx2");
         if specialised && len >= 32 {
-            // SAFETY: features checked; len >= 32; caller upholds shard invariants.
+            // SAFETY: features checked; len >= 32; coverage and lengths asserted above.
             unsafe {
                 match (k, m) {
-                    (7, 13) => return encode_ymm::<7, 13, _, _>(affine, data, parity),
-                    (10, 10) => return encode_ymm::<10, 10, _, _>(affine, data, parity),
+                    (7, 13) => return encode_ymm::<7, 13, _, _>(mats.flat(), data, parity),
+                    (10, 10) => return encode_ymm::<10, 10, _, _>(mats.flat(), data, parity),
                     _ => {}
                 }
             }
         }
-        if is_x86_feature_detected!("avx2")
-            && !(is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx512f"))
-        {
-            debug_assert_eq!(nibbles.k, k);
-            // SAFETY: avx2 checked; nibbles cover all m*k; equal-length contract holds.
+        if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx512f") {
+            // SAFETY: features checked; coverage and lengths asserted above.
+            unsafe { encode_gfni_tiles(mats, data, parity) };
+            return;
+        }
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 checked; coverage and lengths asserted above.
             unsafe { encode_avx2_tiles(nibbles, data, parity) };
             return;
         }
-        encode(gen_rows, data, parity);
+        encode_fallback(gen_rows, data, parity);
     }
 }
 
@@ -667,11 +705,11 @@ mod tests {
                     let ins: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
                     let mut got = vec![vec![0u8; len]; m];
                     {
-                        let affine: Vec<i64> = matrix.iter().map(|&c| affine_of(c)).collect();
+                        let mats = AffineMatrices::new(&matrix, m, k);
                         let nibbles = NibbleTables::new(&matrix, m, k);
                         let mut outs: Vec<&mut [u8]> =
                             got.iter_mut().map(|v| v.as_mut_slice()).collect();
-                        encode_ymm_dispatch(&affine, &nibbles, &gen_rows, &ins, &mut outs);
+                        encode_with_tables(&mats, &nibbles, &gen_rows, &ins, &mut outs);
                     }
                     assert_eq!(got, want, "ymm k={k} m={m} len={len}");
                 }

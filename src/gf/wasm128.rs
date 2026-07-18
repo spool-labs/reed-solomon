@@ -1,8 +1,11 @@
 //! wasm32 simd128 GF(2^8) slice-multiply kernel.
 #![cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 
-use crate::galois::MUL_TABLE;
 use core::arch::wasm32::*;
+
+use crate::galois::MUL_TABLE;
+
+use super::scalar;
 
 /// Upper bound on data + parity shards, so input pointers fit a stack array.
 const MAX_SHARDS: usize = 256;
@@ -85,7 +88,8 @@ pub fn mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-/// Compute all parity shards `parity[o] = Σ_i gen_rows[o][i] * data[i]`, with a per-coefficient fallback for unspecialised shapes or sub-block shards
+/// Compute all parity shards from the data shards in one fused pass, with a
+/// scalar fallback for sub-block shards
 pub fn encode_fused<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     tables: &[u8],
     gen_rows: &[Rows],
@@ -94,6 +98,16 @@ pub fn encode_fused<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
 ) {
     let (k, m) = (data.len(), parity.len());
     let len = data.first().map(|s| s.as_ref().len()).unwrap_or(0);
+
+    // The kernels below do unchecked table and shard reads.
+    assert!(tables.len() >= m * k * 32, "nibble tables do not cover the matrix");
+    for shard in data {
+        assert_eq!(shard.as_ref().len(), len, "input shards must share one length");
+    }
+    for shard in parity.iter_mut() {
+        assert_eq!(shard.as_mut().len(), len, "parity shards must share one length");
+    }
+
     if len >= 16 {
         // SAFETY: len >= 16; `tables` covers m*k; shard-count/length invariants
         // are the caller's contract (upheld by `ReedSolomon::encode`).
@@ -121,16 +135,16 @@ pub fn encode_fused<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
         }
         return;
     }
-    // Fallback: per-coefficient (len < 16).
-    let k = data.len();
+    // Too short for a vector block. The scalar kernel's table row lookup beats
+    // building per-coefficient nibble tables at these lengths.
     for (o, out) in parity.iter_mut().enumerate() {
         let out = out.as_mut();
-        for i in 0..k {
+        for (i, shard) in data.iter().enumerate() {
             let c = gen_rows[o].as_ref()[i];
             if i == 0 {
-                mul_slice(out, data[0].as_ref(), c);
+                scalar::mul_slice(out, shard.as_ref(), c);
             } else {
-                mul_slice_xor(out, data[i].as_ref(), c);
+                scalar::mul_slice_xor(out, shard.as_ref(), c);
             }
         }
     }

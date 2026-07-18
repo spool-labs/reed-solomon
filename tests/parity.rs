@@ -6,6 +6,8 @@
 //!       with tape_rs, assert recovered == original (proves we decode already-
 //!       stored parity, which a same-impl round-trip cannot).
 //!   (c) round-trip: encode with tape_rs, erase, rebuild with tape_rs.
+//!   (d) prepared decode: rebuild the rse-encoded stripe through a
+//!       PreparedDecoder and through reconstruct_rows; both must match (b).
 
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use reed_solomon_erasure::galois_8::ReedSolomon as Rse;
@@ -72,6 +74,53 @@ fn reconstruct_with_tape(
     shards
 }
 
+/// Rebuild through prepare_decode and through reconstruct_rows; both must
+/// recover the original stripe.
+fn reconstruct_prepared_and_rows(
+    rs: &TapeRs,
+    full: &[Vec<u8>],
+    erasures: &[usize],
+) -> bool {
+    let total = full.len();
+    let sz = full[0].len();
+    let mut present = vec![true; total];
+    for &i in erasures {
+        present[i] = false;
+    }
+
+    let decoder = rs.prepare_decode(&present).unwrap();
+    let mut shards = full.to_vec();
+    for &i in erasures {
+        shards[i].fill(0);
+    }
+    {
+        let mut opt: Vec<(&mut [u8], bool)> =
+            shards.iter_mut().map(|s| (s.as_mut_slice(), true)).collect();
+        for &i in erasures {
+            opt[i].1 = false;
+        }
+        decoder.reconstruct(&mut opt).unwrap();
+    }
+    let prepared_ok = shards == full;
+
+    let mut rows = Vec::with_capacity(total * sz);
+    for shard in full {
+        rows.extend_from_slice(shard);
+    }
+    for &i in erasures {
+        rows[i * sz..(i + 1) * sz].fill(0);
+    }
+    rs.reconstruct_rows(&mut rows, sz, &present).unwrap();
+    let mut rows_ok = true;
+    for (i, shard) in full.iter().enumerate() {
+        if &rows[i * sz..(i + 1) * sz] != shard.as_slice() {
+            rows_ok = false;
+        }
+    }
+
+    prepared_ok && rows_ok
+}
+
 #[test]
 fn wire_compat_gate() {
     let mut rng = StdRng::seed_from_u64(0xC1A7);
@@ -79,6 +128,7 @@ fn wire_compat_gate() {
     let mut passed_a = 0usize;
     let mut passed_b = 0usize;
     let mut passed_c = 0usize;
+    let mut passed_d = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
     for &(k, m) in PARAMS {
@@ -106,6 +156,7 @@ fn wire_compat_gate() {
             // Try several erasure patterns, including the maximal m erasures.
             let mut b_ok = true;
             let mut c_ok = true;
+            let mut d_ok = true;
             for &e in &[0usize, 1, m / 2, m] {
                 let erasures = pick_erasures(k + m, e, &mut rng);
 
@@ -120,6 +171,11 @@ fn wire_compat_gate() {
                 if rebuilt2 != a {
                     c_ok = false;
                 }
+
+                // (d) prepared decoder + contiguous rows on the rse stripe.
+                if !reconstruct_prepared_and_rows(&tape, &original, &erasures) {
+                    d_ok = false;
+                }
             }
             if b_ok {
                 passed_b += 1;
@@ -130,6 +186,11 @@ fn wire_compat_gate() {
                 passed_c += 1;
             } else {
                 failures.push(format!("(c) round-trip k={k} m={m} sz={sz}"));
+            }
+            if d_ok {
+                passed_d += 1;
+            } else {
+                failures.push(format!("(d) prepared/rows reconstruct k={k} m={m} sz={sz}"));
             }
 
             checked += 1;
@@ -144,6 +205,7 @@ fn wire_compat_gate() {
     eprintln!("  (a) encode-parity:          {passed_a}/{checked}");
     eprintln!("  (b) cross-impl reconstruct: {passed_b}/{checked}");
     eprintln!("  (c) round-trip:             {passed_c}/{checked}");
+    eprintln!("  (d) prepared/rows:          {passed_d}/{checked}");
 
     assert!(
         failures.is_empty(),

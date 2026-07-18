@@ -179,6 +179,100 @@ fn run_shape(k: usize, m: usize) {
     }
 }
 
+/// Reconstruct throughput for one erasure pattern: reed-solomon-erasure vs
+/// tape's cached-plan reconstruct vs an explicit PreparedDecoder. Payload is
+/// k*size, matching the encode tables. sia has no comparable slice-reconstruct
+/// entry point, so it sits this table out.
+fn run_reconstruct(k: usize, m: usize) {
+    let sizes: &[usize] = &[1_000, 10_000, 100_000, 1_000_000];
+
+    // Worst case erases as much data as the code can survive.
+    let single: Vec<usize> = vec![0];
+    let mut worst: Vec<usize> = (0..m.min(k)).collect();
+    worst.extend(k..k + m.saturating_sub(k));
+    let patterns: &[(&str, &Vec<usize>)] = &[("1 data", &single), ("max m", &worst)];
+
+    for (label, erasures) in patterns {
+        println!(
+            "\n--- reconstruct ({k},{m}), erased {} [{label}] — payload MiB/s ---",
+            erasures.len()
+        );
+        println!(
+            "{:<7} {:>10} {:>10} {:>10} {:>6}",
+            "size", "rse(C)", "tape", "tapePrep", "iters"
+        );
+
+        let mut rng = StdRng::seed_from_u64(0xDECD);
+        for &sz in sizes {
+            let payload = (k * sz) as f64;
+            let iters = (200_000_000usize / (k * sz)).clamp(20, 2000);
+            let warmup = (iters / 10).clamp(3, 30);
+
+            let mut full = base(k, m, sz, &mut rng);
+            let tape = Tape::new(k, m).unwrap();
+            let rse = Rse::new(k, m).unwrap();
+            tape.encode(&mut full).unwrap();
+
+            let mut present = vec![true; k + m];
+            for &e in erasures.iter() {
+                present[e] = false;
+            }
+            let prepared = tape.prepare_decode(&present).unwrap();
+
+            // Correctness first: a zeroed-out erasure set must rebuild exactly.
+            for reconstruct in [0u8, 1, 2] {
+                let mut shards = full.clone();
+                for &e in erasures.iter() {
+                    shards[e].fill(0);
+                }
+                let mut view: Vec<(&mut [u8], bool)> =
+                    shards.iter_mut().map(|s| (s.as_mut_slice(), true)).collect();
+                for &e in erasures.iter() {
+                    view[e].1 = false;
+                }
+                match reconstruct {
+                    0 => rse.reconstruct(&mut view).unwrap(),
+                    1 => tape.reconstruct(&mut view).unwrap(),
+                    _ => prepared.reconstruct(&mut view).unwrap(),
+                }
+                assert_eq!(shards, full, "reconstruct mismatch ({k},{m}) sz={sz}");
+            }
+
+            // Timing: the erased slots keep valid lengths and just get flagged
+            // absent each iteration, so the measured work is reconstruct only.
+            let mut shards = full.clone();
+            let time_one = |which: u8, shards: &mut Vec<Vec<u8>>| {
+                secs(
+                    || {
+                        let mut view: Vec<(&mut [u8], bool)> = shards
+                            .iter_mut()
+                            .map(|s| (s.as_mut_slice(), true))
+                            .collect();
+                        for &e in erasures.iter() {
+                            view[e].1 = false;
+                        }
+                        match which {
+                            0 => rse.reconstruct(&mut view).unwrap(),
+                            1 => tape.reconstruct(&mut view).unwrap(),
+                            _ => prepared.reconstruct(&mut view).unwrap(),
+                        }
+                    },
+                    warmup,
+                    iters,
+                )
+            };
+            let v_rse = mib(payload, iters, time_one(0, &mut shards));
+            let v_tape = mib(payload, iters, time_one(1, &mut shards));
+            let v_prep = mib(payload, iters, time_one(2, &mut shards));
+
+            println!(
+                "{:<7} {:>10.0} {:>10.0} {:>10.0} {:>6}",
+                size_label(sz), v_rse, v_tape, v_prep, iters
+            );
+        }
+    }
+}
+
 /// Ramp the CPU to a steady clock before measuring the first cell.
 fn prime(ms: u64) {
     let rs = Tape::new(10, 10).unwrap();
@@ -200,6 +294,9 @@ fn main() {
     prime(400);
     for &(k, m) in SHAPES {
         run_shape(k, m);
+    }
+    for &(k, m) in SHAPES {
+        run_reconstruct(k, m);
     }
     println!(
         "\npayload = data bytes only (k*size); speedup = column / rse(C). x86 columns:\n\

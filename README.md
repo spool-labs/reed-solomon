@@ -11,29 +11,41 @@ rs.encode(&mut shards)?;        // shards: data shards followed by parity shards
 rs.reconstruct(&mut shards)?;   // fills in missing shards in place
 ```
 
-`new`, `encode`, `verify`, `reconstruct`, `reconstruct_data`, and `encode_rows`
-(a batched encode over whole contiguous rows in a single pass).
+`new`, `encode`, `verify`, `reconstruct`, `reconstruct_data`, plus batched and
+prepared entry points:
+
+- `encode_rows` / `encode_rows_into`: encode whole contiguous rows in a single
+  fused pass, allocating or into a caller buffer.
+- `reconstruct_rows`: rebuild missing rows inside one contiguous buffer.
+- `prepare_decode`: build a `PreparedDecoder` for one erasure pattern; it owns
+  the inverted decode matrix and kernel tables, so decoding many stripes with
+  the same pattern pays for the inversion once.
+
+`reconstruct` also caches decode plans per erasure pattern internally, so
+repeated calls with the same pattern skip the matrix inversion either way.
+Encode, verify, and every reconstruct path run through the fused kernels.
 
 ## Backends
 
-Field math routes through `gf::mul_slice` / `gf::mul_slice_xor`. The scalar kernel
-is the reference; every SIMD kernel builds its tables from `galois::mul`, so all
-kernels are byte-identical to scalar by construction, each with a scalar tail for
-sub-vector remainders.
+Field math routes through `gf::mul_slice` / `gf::mul_slice_xor`, and the bulk
+paths through per-architecture fused multi-output kernels. The scalar kernel
+is the reference; every SIMD kernel builds its tables from `galois::mul`, and
+per-backend differential tests pin them byte-identical to scalar.
 
 | arch    | backend                                   | kernel              |
 |---------|-------------------------------------------|---------------------|
 | x86_64  | GFNI > AVX-512BW > AVX2 > SSSE3 > scalar   | `src/gf/x86.rs`     |
-| aarch64 | NEON                                      | `src/gf/neon.rs`    |
+| aarch64 | NEON (sha3 fold when available)           | `src/gf/neon.rs`    |
 | wasm32  | simd128 (under `+simd128`)                | `src/gf/wasm128.rs` |
 | other   | scalar                                    | `src/gf/scalar.rs`  |
 
 ## Cargo features
 
-The backend can be pinned at build time instead of detected at runtime — useful
-for a homogeneous fleet, a single-kernel benchmark, or a smaller binary. Set **at
-most one**; a pinned kernel the target CPU lacks faults (illegal instruction) at
-runtime, so pin only what the target supports.
+The default build detects CPU features at runtime and falls back gracefully,
+so it is safe on any host. A feature pins one kernel at build time instead,
+which is useful for a homogeneous fleet, a single-kernel benchmark, or a
+smaller binary. A pinned kernel the target CPU lacks faults (illegal
+instruction) at runtime, so pin only what the whole fleet supports.
 
 | feature  | backend                          |
 |----------|----------------------------------|
@@ -44,11 +56,11 @@ runtime, so pin only what the target supports.
 | `gfni`   | x86_64 GFNI + AVX-512            |
 | `neon`   | aarch64 NEON                     |
 
-The default is **`gfni`** (the full x86 build). For runtime CPU dispatch with
-graceful fallback, build with `--no-default-features`. For a non-GFNI x86 target,
-build with `--no-default-features --features avx2` (or `ssse3`). Because the
-default already pins one backend, any override must start from
-`--no-default-features`.
+Combining `scalar` with anything, or two x86 pins with each other, is a
+compile error: cargo unifies features across a workspace, and two dependents
+pinning different kernels would otherwise silently run the narrowest one.
+Pairing an x86 pin with `neon` stays legal for multi-target workspaces; each
+pin only applies on its own architecture.
 
 On wasm32 the backend is chosen by the `+simd128` target-feature:
 
@@ -62,11 +74,12 @@ RUSTFLAGS="-C target-feature=+simd128" cargo build --target wasm32-unknown-unkno
 cargo test    # unit tests, per-backend differential-vs-scalar, wire-compat gate
 ```
 
-`tests/parity.rs` verifies byte-identical output against an independent reference
-implementation across 8 shard shapes x 3 sizes, plus cross-implementation
-reconstruct and round-trip. On x86 hosts `cargo test` exercises whichever of
-GFNI/AVX-512/AVX2/SSSE3 the CPU supports (add `--no-default-features` on a
-non-GFNI x86 host); on aarch64, NEON.
+`tests/parity.rs` verifies byte-identical output against an independent
+reference implementation across 8 shard shapes x 3 sizes, plus
+cross-implementation reconstruct, round-trip, and the prepared-decoder and
+contiguous-rows paths against reference-encoded stripes. On x86 hosts
+`cargo test` exercises whichever of GFNI/AVX-512/AVX2/SSSE3 the CPU supports;
+on aarch64, NEON.
 
 Benchmarks and cross-implementation harnesses live under `benches/`.
 

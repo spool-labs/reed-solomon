@@ -119,7 +119,7 @@ impl Matrix {
             }
             // No pivot found: the matrix is singular.
             if self.get(r, r) == 0 {
-                return Err(Error::IncorrectShardSize);
+                return Err(Error::SingularMatrix);
             }
             if self.get(r, r) != 1 {
                 let scale = galois::div(1, self.get(r, r));

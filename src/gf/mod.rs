@@ -2,6 +2,7 @@
 //! available SIMD kernel for the target architecture at runtime.
 
 pub mod scalar;
+pub mod tables;
 
 // Affine-matrix derivation for the x86 `gf2p8affineqb` kernels. Pure scalar
 // arithmetic, so it is compiled and tested on any host, not just x86_64.
@@ -45,7 +46,7 @@ pub fn mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
 }
 
 // --- aarch64 --------------------------------------------------------------
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     #[cfg(feature = "neon")]
@@ -58,7 +59,7 @@ fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     #[cfg(feature = "neon")]
@@ -72,9 +73,13 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
 }
 
 // --- x86_64 ---------------------------------------------------------------
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
+    // A pinned backend already knows its kernel, so skip runtime detection.
+    #[cfg(any(feature = "ssse3", feature = "avx2", feature = "avx512", feature = "gfni"))]
+    return x86::mul_slice(out, input, coeff);
+    #[cfg(not(any(feature = "ssse3", feature = "avx2", feature = "avx512", feature = "gfni")))]
     if is_x86_feature_detected!("gfni")
         || is_x86_feature_detected!("avx512f")
         || is_x86_feature_detected!("avx2")
@@ -86,9 +91,13 @@ fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
+    // A pinned backend already knows its kernel, so skip runtime detection.
+    #[cfg(any(feature = "ssse3", feature = "avx2", feature = "avx512", feature = "gfni"))]
+    return x86::mul_slice_xor(out, input, coeff);
+    #[cfg(not(any(feature = "ssse3", feature = "avx2", feature = "avx512", feature = "gfni")))]
     if is_x86_feature_detected!("gfni")
         || is_x86_feature_detected!("avx512f")
         || is_x86_feature_detected!("avx2")
@@ -101,7 +110,7 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
 }
 
 // --- wasm32 ---------------------------------------------------------------
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     #[cfg(target_feature = "simd128")]
@@ -114,7 +123,7 @@ fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     #[cfg(target_feature = "simd128")]
@@ -129,6 +138,7 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
 
 // --- every other arch -----------------------------------------------------
 #[cfg(not(any(
+    feature = "scalar",
     target_arch = "aarch64",
     target_arch = "x86_64",
     target_arch = "wasm32"
@@ -139,6 +149,7 @@ fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
 }
 
 #[cfg(not(any(
+    feature = "scalar",
     target_arch = "aarch64",
     target_arch = "x86_64",
     target_arch = "wasm32"

@@ -17,6 +17,7 @@ pub enum Error {
     EmptyShard,
     InvalidShardFlags,
     InvalidIndex,
+    SingularMatrix,
 }
 
 impl Error {
@@ -35,6 +36,7 @@ impl Error {
             Error::EmptyShard => "The first shard provided is of zero length",
             Error::InvalidShardFlags => "The number of flags does not match the total number of shards",
             Error::InvalidIndex => "The data shard index provided is greater or equal to the number of data shards in codec",
+            Error::SingularMatrix => "The decode matrix for this shard pattern is singular and cannot be inverted",
         }
     }
 }

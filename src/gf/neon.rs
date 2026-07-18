@@ -63,7 +63,8 @@ unsafe fn mul_slice_core<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u
 #[inline]
 pub fn mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
     assert_eq!(input.len(), out.len());
-    // SAFETY: dispatched only under `is_aarch64_feature_detected!("neon")`.
+    // SAFETY: NEON is part of the aarch64 baseline for every std target this
+    // crate supports, and lengths are asserted equal above.
     unsafe { mul_slice_core::<false>(out, input, coeff) }
 }
 
@@ -71,7 +72,8 @@ pub fn mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
 #[inline]
 pub fn mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     assert_eq!(input.len(), out.len());
-    // SAFETY: dispatched only under `is_aarch64_feature_detected!("neon")`.
+    // SAFETY: NEON is part of the aarch64 baseline for every std target this
+    // crate supports, and lengths are asserted equal above.
     unsafe { mul_slice_core::<true>(out, input, coeff) }
 }
 
