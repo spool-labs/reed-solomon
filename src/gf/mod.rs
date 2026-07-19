@@ -70,7 +70,7 @@ pub fn mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     dispatch_mul_slice_xor(out, input, coeff);
 }
 
-// --- aarch64 --------------------------------------------------------------
+// aarch64
 #[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -97,7 +97,7 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-// --- x86_64 ---------------------------------------------------------------
+// x86_64
 #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -134,7 +134,7 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-// --- wasm32 ---------------------------------------------------------------
+// wasm32
 #[cfg(all(target_arch = "wasm32", not(feature = "scalar")))]
 #[inline]
 fn dispatch_mul_slice(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -161,7 +161,7 @@ fn dispatch_mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-// --- every other arch -----------------------------------------------------
+// every other arch
 #[cfg(not(any(
     feature = "scalar",
     target_arch = "aarch64",

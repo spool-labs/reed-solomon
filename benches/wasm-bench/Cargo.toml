@@ -1,6 +1,6 @@
 # Local wasm simd128 bench — build with wasm-pack, run under Node 24. Compares the
 # fused+cached kernel (`encode`) vs the per-coefficient baseline (`encode_percoeff`)
-# vs scalar, at the PR-70 per-plane sizes. Standalone [workspace].
+# vs scalar, at the production per-plane sizes. Standalone [workspace].
 [package]
 name = "wasm-bench"
 version = "0.0.0"

@@ -5,8 +5,8 @@ Two benchmarks answer two different questions:
 - **Correctness / wire-compat** lives in the crate (`tests/parity.rs`) and diffs the
   pure-Rust **scalar** `reed-solomon-erasure`, so it needs no C toolchain and runs anywhere.
 - **Performance** lives in `bench-harness/` (a standalone package, *not* a crate
-  dependency). It benchmarks against rse **+`simd-accel`** (the C SIMD backend Clay
-  actually ships on native) and against **`sia_reed_solomon`**.
+  dependency). It benchmarks against rse **+`simd-accel`** (the C SIMD backend that
+  ships in production on native) and against **`sia_reed_solomon`**.
 
 Speedups are vs the **C-accelerated** rse (the real native delta, not the misleading
 scalar-rse number). This doc leads with the current state; the run-by-run record,
@@ -88,7 +88,7 @@ Erased the maximal m shards (worst case):
 
 Worst-case reconstruct tracks the fused encode numbers, which is the point: the
 decode rows go through the same kernels. The cached-plan path (`reconstruct`, what
-Clay calls per layer) matches the explicit `PreparedDecoder`, so the plan cache is
+production calls per layer) matches the explicit `PreparedDecoder`, so the plan cache is
 doing its job; prepared decoding skips the per-call pattern lookup and the codec's
 plan mutex. On x86 (Zen 5) worst-case reconstruct rides the same overlapped 32-byte
 tail: (7,13) all-13-erased reaches 2352 MiB/s at 100 B and 13431 at 1 KB. wasm
@@ -96,19 +96,12 @@ worst-case does 3682 at (7,13) 1 KB and 5930 at (10,10) 10 KB.
 
 ## Methodology: single-thread, and why
 
-sia's default features are `["parallel", "simd"]` (`parallel = rayon`), and it also
-cache-blocks the length dimension into 32 KiB blocks. The harness pins **sia to
-single-threaded** (`default-features = false, features = ["simd"]`) because **Clay
-parallelises across stripes upstream** (tape-internal; `OPTIMIZATION-STATUS.md`:
-"threading inside the crate would just fight it"). sia's rayon threads a *single*
-encode across all cores, which would oversubscribe against Clay's stripe-level
-parallelism, so the operating point that matters for Clay is one encode, single-
-threaded. tape and reed-solomon-erasure are single-threaded already.
+because **the production system parallelises across stripes upstream**, so threading inside the crate would just fight it.
 
 ## Reproduce
 
 - **Native / NEON, local:** `cd bench-harness && cargo run --release`.
-- **wasm simd128, local (no GCP):** build with
+- **wasm simd128, local:** build with
   `RUSTFLAGS="-C target-feature=+simd128" wasm-pack build wasm-bench --target nodejs --release`,
   then `node wasm-bench/run.mjs` under Node 24. The differential `verify()` (fused ==
   scalar across generated, staged, and fused shapes and tail lengths) and the
@@ -139,18 +132,13 @@ threaded. tape and reed-solomon-erasure are single-threaded already.
   through the fused kernels. The FFT decoding formulation for arbitrary survivor sets
   (the formal-derivative method firedancer uses for recover) costs about three
   transforms plus pointwise work regardless of erasure count, which loses to the plans
-  at Clay's n of about 20 for every pattern up to the worst case. The one pattern FFT
-  accelerates (all data present, parity missing) is re-encoding, which Clay already
-  routes to encode. If far larger shapes ever matter, the staged stage vocabulary
+  at the production n of about 20 for every pattern up to the worst case. The one
+  pattern FFT accelerates (all data present, parity missing) is re-encoding, which
+  production already routes to encode. If far larger shapes ever matter, the staged stage vocabulary
   extends to the derivative method by adding a pointwise stage kind.
 - **Large-shard cache-blocking: superseded.** The pre-FFT fused kernel fell off a
   cliff past cache (20 concurrent streams); the "length-blocked kernel for 100 KB+"
   lever is superseded by FFT, which leads at every measured size.
-- **Multi-threading: no.** Parallelism lives upstream in Clay; rayon inside the crate
-  would fight its stripe parallelism. This is a case where tape correctly differs from
-  sia. Build-over-vendor is validated on performance: at Clay's operating point (one
-  encode at a time, per-plane sizes) tape beats both the C backend and sia outright,
-  pure-Rust and tape-owned.
 - **Milan / AVX2 (no GFNI): fused AVX2, not FFT.** The FFT executors need GFNI; hosts
   without it take the fused AVX2 tiles (History → *AMD Zen 3*, the only AVX2/Milan run).
 
@@ -239,8 +227,8 @@ superseded by the zmm tier and the five-shape final run above.
 
 ### Arbitrary shapes: the staged FFT executor (2026-07-18, fourth pass)
 
-Clay profiles are runtime data: shortening turns legal profiles into shapes like
-(14,14) (from ClayParams 20,6,19) or (18,6) (from 20,14,19). The builder compiles ANY
+Production profiles are runtime data: shortening turns legal profiles into shapes like
+(14,14) (from a profile 20,6,19) or (18,6) (from 20,14,19). The builder compiles ANY
 shape at construction into a staged program: whole FFT/IFFT block stages over a stack
 register file, short glue runs between stages, trailing parity cosets folded down so no
 transform output is wasted. Byte-checked against the matrix encode across 21 shapes.

@@ -1,6 +1,6 @@
 // Verify the wasm-simd128 GF multiply is correct, then race it against the scalar
-// table kernel over the exact Clay (20,10,13) RS working set (k=10 -> m=10, node
-// rows of 32768B; and the per-plane 32B structure Clay currently uses).
+// table kernel over the exact production (20,10,13) RS working set (k=10 -> m=10, node
+// rows of 32768B; and the per-plane 32B structure the production system currently uses).
 import { createRequire } from 'node:module';
 import { randomFillSync } from 'node:crypto';
 const require = createRequire(import.meta.url);
@@ -39,5 +39,4 @@ p('simd128 full-row (32KB)', bench(() => g.encode_fullrow_simd(data, k, m, row, 
 p('simd128 per-plane (32B)', bench(() => g.encode_plane_simd(data, k, m, row, sub, matrix)), base.mibps);
 
 console.log(`\ncontext (payload MiB/s, from earlier runs):`);
-console.log(`  our clay wasm encode (scalar RS today): ~175   |  Shelby wasm encode: ~395`);
-console.log(`  native clay encode: scalar RS 193  ->  C-SIMD RS 371 (1.92x)\n`);
+console.log(`  native production encode: scalar RS 193  ->  C-SIMD RS 371 (1.92x)\n`);

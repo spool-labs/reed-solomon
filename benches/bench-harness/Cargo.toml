@@ -1,6 +1,6 @@
 # Benchmark-only harness — NOT part of the tape-reed-solomon crate. It path-deps
 # the crate and pulls in the two things the shipping crate must never depend on:
-#   * reed-solomon-erasure WITH `simd-accel` — the C SIMD backend Clay actually
+#   * reed-solomon-erasure WITH `simd-accel` — the C SIMD backend the production system actually
 #     ships on native, so speedups here are the REAL native delta (not vs scalar).
 #   * sia_reed_solomon — a storage competitor; reference for the build-vs-vendor call.
 # `[workspace]` makes this a standalone root so it is never absorbed into the crate.
@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 tape-reed-solomon = { path = "../.." }
 reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
-# default-features OFF: drop sia's `parallel` (rayon). Clay parallelises across
+# default-features OFF: drop sia's `parallel` (rayon). The production system parallelises across
 # stripes upstream, so the relevant comparison is single-thread vs single-thread —
 # this isolates sia's 32 KiB cache-blocking from its multi-threading.
 sia_reed_solomon = { version = "0.3", default-features = false, features = ["simd"] }

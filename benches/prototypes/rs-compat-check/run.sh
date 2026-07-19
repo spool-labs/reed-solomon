@@ -11,7 +11,7 @@ command -v cargo >/dev/null || { curl --proto '=https' --tlsv1.2 -sSf https://sh
 # firedancer-reed-solomon next to this crate. Shallow, and only init the firedancer
 # submodule (NOT its nested submodules) — the reedsol build needs just src/ballet+util.
 if [ ! -d ../firedancer-reed-solomon ]; then
-  git clone --depth 1 https://github.com/crypt0miester/firedancer-reed-solomon ../firedancer-reed-solomon
+  git clone --depth 1 https://github.com/leafaar/firedancer-reed-solomon ../firedancer-reed-solomon
   ( cd ../firedancer-reed-solomon && git submodule update --init --depth 1 firedancer )
 fi
 

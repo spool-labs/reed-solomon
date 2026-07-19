@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Same-run head-to-head at Clay's PRODUCTION shape (7,13) and (10,10):
+//! Same-run head-to-head at the production shape (7,13) and (10,10):
 //! firedancer vs tape `encode_fused` vs sia vs reed-solomon-erasure(+simd-accel).
 //! x86 only: firedancer is a C FFI. Run via run.sh on a GCP c3 (GFNI + AVX-512).
 //!
@@ -14,7 +14,7 @@ use std::time::Instant;
 use tape_reed_solomon::ReedSolomon as Tape;
 
 // The two generated production shapes, then runtime shapes that exercise the
-// staged and fused paths (legal clay profiles reach them through shortening).
+// staged and fused paths (legal production profiles reach them through shortening).
 const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10), (14, 14), (16, 16), (18, 6)];
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000];
 

@@ -19,7 +19,7 @@ use crate::matrix::Matrix;
 /// resident and a mismatch is caught without recomputing the whole shard
 const VERIFY_BLOCK_SIZE: usize = 32 * 1024;
 
-/// Decode plans kept per codec. Callers like Clay cycle through a small set of
+/// Decode plans kept per codec. Callers typically cycle through a small set of
 /// erasure patterns per decode, so a short list scanned linearly is enough
 const DECODE_PLAN_CACHE_LIMIT: usize = 64;
 
@@ -583,7 +583,7 @@ impl ReedSolomon {
         reconstruct_with_plan(self.data_shard_count, &plan, shards, shard_len, data_only)
     }
 
-    // --- full-row batched encode ---
+    // full-row batched encode
 
     /// Encodes parity over full contiguous node rows in one sweep.
     ///
@@ -639,7 +639,7 @@ impl ReedSolomon {
         self.parity.apply(&inputs, &mut outputs);
     }
 
-    // --- internal checks ------------------------------------------------------
+    // internal checks
 
     fn check_piece_count_all(&self, count: usize) -> Result<(), Error> {
         if count < self.total_shard_count {
@@ -913,7 +913,7 @@ mod tests {
     }
 
     // runtime shapes route through the staged program and match the scalar
-    // reference on every strip phase, including clay-derived shortened shapes
+    // reference on every strip phase, including shortened runtime shapes
     #[test]
     fn staged_matches_scalar() {
         for &(k, m) in &[

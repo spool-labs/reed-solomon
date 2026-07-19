@@ -12,7 +12,7 @@ console.log(`reconstruct gate (erase up to m, rebuild == original, five shapes):
 if (badR !== 0) process.exit(1);
 
 const SHAPES = [[7, 13], [10, 10], [16, 16], [14, 14], [18, 6]];
-// PR-70 per-plane range (~100 B – 1.4 KB at the 1 MB stripe cap), plus a large one.
+// the production per-plane range (~100 B – 1.4 KB at the 1 MB stripe cap), plus a large one.
 const SIZES = [100, 256, 512, 1024, 1430, 10000];
 
 function measure(fn, k, m, sz) {

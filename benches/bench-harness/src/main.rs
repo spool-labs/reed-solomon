@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Head-to-head RS **encode** throughput: tape-reed-solomon vs sia_reed_solomon
 //! vs reed-solomon-erasure, the last WITH `simd-accel`, i.e. the C SIMD backend
-//! Clay actually ships on native (C NEON on aarch64, C AVX2/etc. on x86_64). So
+//! the production system actually ships on native (C NEON on aarch64, C AVX2/etc. on x86_64). So
 //! every speedup below is the REAL native delta, not the scalar-rse number.
 //!
 //!   aarch64 (dev host): NEON.   x86_64 (GCP c3 Sapphire Rapids): AVX2/AVX-512/GFNI.
@@ -16,10 +16,10 @@ use sia_reed_solomon::ReedSolomon as Sia;
 use std::time::Instant;
 use tape_reed_solomon::ReedSolomon as Tape;
 
-// (7,13) = tape-internal PRODUCTION shape (ClayParams::DEFAULT n=20,k=7,d=16 -> m=13,
+// (7,13) = the production shape (production profile n=20, k=7, d=16 -> m=13,
 // RS original_count=k=7). (10,10) kept for continuity with earlier runs.
 const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10)];
-// Clay-reachable shapes beyond the two production ones, e.g. ClayParams
+// production-reachable shapes beyond the two production ones, e.g. a profile
 // (20,6,19) -> RS(14,14) through shortening; all five carry generated
 // programs now.
 const EXTRA_SHAPES: &[(usize, usize)] = &[(14, 14), (16, 16), (18, 6), (64, 64)];
@@ -334,7 +334,7 @@ fn prime(ms: u64) {
 fn main() {
     println!("=== tape-reed-solomon head-to-head (encode) ===");
     println!("arch: {}   detected: {}", std::env::consts::ARCH, detected_features());
-    println!("baseline: reed-solomon-erasure galois_8 +simd-accel (the C SIMD backend Clay ships)");
+    println!("baseline: reed-solomon-erasure galois_8 +simd-accel (the C SIMD backend the production system ships)");
     gate();
     prime(400);
     for &(k, m) in SHAPES {

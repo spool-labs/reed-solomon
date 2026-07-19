@@ -1,7 +1,7 @@
 // RS backend gate + native perf, to run on an x86 GCP node.
 //
 // GATE: does firedancer's fd_reedsol produce byte-identical parity to
-// reed-solomon-erasure at Clay's actual (k,m) params (not just turbine 32/32)?
+// reed-solomon-erasure at the production (k,m) params (not just turbine 32/32)?
 // Encode-parity equality is a SUFFICIENT proof of full wire-compat: identical
 // parity => identical generator matrix => reconstruct also agrees.
 //
@@ -39,7 +39,7 @@ fn main() {
             Fd::new(k, m).unwrap().encode(&mut b).unwrap();
             let ok = (k..k + m).all(|i| a[i] == b[i]);
             all_ok &= ok;
-            let tag = if (k, m) == (10, 10) { "  <-- Clay (20,10,13)" } else { "" };
+            let tag = if (k, m) == (10, 10) { "  <-- production (20,10,13)" } else { "" };
             println!("  k={:>2} m={:>2} sz={:>5}: {}{}", k, m, sz, if ok { "MATCH" } else { "DIFFER ***" }, tag);
         }
     }

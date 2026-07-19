@@ -37,7 +37,7 @@ fn tail(out: &mut [u8], input: &[u8], coeff: u8, xor: bool) {
     }
 }
 
-// --- SSSE3 nibble-split (16-byte pshufb) ------------------------------------
+// SSSE3 nibble-split (16-byte pshufb)
 
 #[target_feature(enable = "ssse3")]
 unsafe fn mul_ssse3<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -65,7 +65,7 @@ unsafe fn mul_ssse3<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
     tail(&mut out[i..], &input[i..], coeff, XOR);
 }
 
-// --- AVX2 nibble-split (32-byte vpshufb) ------------------------------------
+// AVX2 nibble-split (32-byte vpshufb)
 
 #[target_feature(enable = "avx2")]
 unsafe fn mul_avx2<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -93,7 +93,7 @@ unsafe fn mul_avx2<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
     tail(&mut out[i..], &input[i..], coeff, XOR);
 }
 
-// --- AVX-512BW nibble-split (64-byte vpshufb) -------------------------------
+// AVX-512BW nibble-split (64-byte vpshufb)
 
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn mul_avx512<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -121,7 +121,7 @@ unsafe fn mul_avx512<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
     tail(&mut out[i..], &input[i..], coeff, XOR);
 }
 
-// --- GFNI affine (in-register 8x8 bit-matrix, no tables) --------------------
+// GFNI affine (in-register 8x8 bit-matrix, no tables)
 
 #[allow(dead_code)] // unused when a wider backend is pinned
 #[target_feature(enable = "gfni,sse2")]
@@ -180,7 +180,7 @@ unsafe fn mul_gfni512<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) 
     tail(&mut out[i..], &input[i..], coeff, XOR);
 }
 
-// --- safe dispatch entry points ---------------------------------------------
+// safe dispatch entry points
 
 #[inline]
 fn run<const XOR: bool>(out: &mut [u8], input: &[u8], coeff: u8) {
@@ -262,7 +262,7 @@ pub fn forced<const XOR: bool>(kind: u8, out: &mut [u8], input: &[u8], coeff: u8
     }
 }
 
-// --- differential test vs scalar --------------------------------------------
+// differential test vs scalar
 
 #[cfg(test)]
 mod tests {

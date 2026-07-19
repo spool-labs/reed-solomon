@@ -10,7 +10,7 @@ publish = false
 tape-reed-solomon = { path = "../.." }
 reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
 sia_reed_solomon = { version = "0.3", default-features = false, features = ["simd"] }
-firedancer-reed-solomon = { git = "https://github.com/crypt0miester/firedancer-reed-solomon" }
+firedancer-reed-solomon = { git = "https://github.com/leafaar/firedancer-reed-solomon" }
 rand = "0.8"
 
 [profile.release]

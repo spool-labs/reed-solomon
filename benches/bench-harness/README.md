@@ -2,7 +2,7 @@
 
 Benchmark-only. **Not** part of the `tape-reed-solomon` crate: it path-deps the
 crate and adds the two things the shipping crate must never depend on —
-`reed-solomon-erasure` **with `simd-accel`** (the C SIMD backend Clay actually
+`reed-solomon-erasure` **with `simd-accel`** (the C SIMD backend the production system actually
 ships) and `sia_reed_solomon` (a storage competitor, reference only). Its
 `[workspace]` table keeps it standalone, so `cargo build`/`cargo test` in the
 crate never touch it.

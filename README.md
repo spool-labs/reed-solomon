@@ -3,6 +3,17 @@
 Pure-Rust Reed-Solomon erasure coding over **GF(2^8)** (primitive polynomial
 `0x11d`), with SIMD-accelerated field arithmetic.
 
+## Performance
+
+Single-thread encode throughput on x86 (Zen 5 Turin, GFNI + AVX-512), as a multiple
+of firedancer's `fd_reedsol`, across the five generated shapes and shard sizes:
+
+![Encode throughput vs firedancer: tape leads 1.0 to 4.3x across every shape and shard size, converging toward parity at 1 MB](charts/speedup.svg)
+
+tape leads at every shape and size, converging toward parity only at 1 MB where both go
+DRAM-bound. Full tables (NEON, wasm, reconstruct, and the run-by-run history) are in
+[`BENCH-RESULTS.md`](BENCH-RESULTS.md).
+
 ## API
 
 ```rust

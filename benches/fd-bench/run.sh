@@ -15,7 +15,7 @@ source "$HOME/.cargo/env" 2>/dev/null || true
 # only the firedancer submodule (not its nested submodules) — reedsol needs just
 # src/ballet + util. Same recipe as reference/prototypes/rs-compat-check/run.sh.
 if [ ! -d ../firedancer-reed-solomon ]; then
-  git clone --depth 1 https://github.com/crypt0miester/firedancer-reed-solomon ../firedancer-reed-solomon
+  git clone --depth 1 https://github.com/leafaar/firedancer-reed-solomon ../firedancer-reed-solomon
   ( cd ../firedancer-reed-solomon && git submodule update --init --depth 1 firedancer )
 fi
 

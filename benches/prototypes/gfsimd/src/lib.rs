@@ -2,7 +2,7 @@
 // vs the scalar per-byte table lookup (== what our wasm build does today).
 //
 // Field: GF(2^8) with generator polynomial 0x11d (== reed-solomon-erasure's 0x1d),
-// the same field Clay/Shelby use, so the multiply is wire-relevant.
+// so the multiply is wire-relevant.
 //
 // SIMD kernel is the classic SSSE3/pshufb == wasm u8x16_swizzle nibble split:
 //   c*v = swizzle(low_c, v & 0x0f) ^ swizzle(high_c, (v >> 4))
@@ -10,7 +10,7 @@
 use core::arch::wasm32::*;
 use wasm_bindgen::prelude::*;
 
-// --- GF(2^8) tables (built once, lazily) -------------------------------------
+// GF(2^8) tables (built once, lazily)
 struct Gf {
     log: [u8; 256],
     exp: [u8; 512],
@@ -56,7 +56,7 @@ fn tables(gf: &Gf, c: u8) -> ([u8; 16], [u8; 16]) {
     (lo, hi)
 }
 
-// --- kernels -----------------------------------------------------------------
+// kernels
 #[inline]
 fn mac_scalar(gf: &Gf, out: &mut [u8], input: &[u8], c: u8) {
     let row = &gf.mul[(c as usize) * 256..(c as usize) * 256 + 256];
@@ -87,7 +87,7 @@ fn mac_simd(out: &mut [u8], input: &[u8], lo: v128, hi: v128, mask: v128) {
     }
 }
 
-// --- correctness: simd mul == scalar gf_mul for all (c, v) -------------------
+// correctness: simd mul == scalar gf_mul for all (c, v)
 #[wasm_bindgen]
 pub fn selftest() -> u32 {
     GF.with(|gf| {
@@ -109,7 +109,7 @@ pub fn selftest() -> u32 {
     })
 }
 
-// --- RS encode: k data rows -> m parity rows, coefficient matrix m*k ---------
+// RS encode: k data rows -> m parity rows, coefficient matrix m*k
 // Full-row structure: each coefficient applied over a whole `row`-byte node row.
 #[wasm_bindgen]
 pub fn encode_fullrow_scalar(data: &[u8], k: usize, m: usize, row: usize, matrix: &[u8]) -> Vec<u8> {
@@ -145,7 +145,7 @@ pub fn encode_fullrow_simd(data: &[u8], k: usize, m: usize, row: usize, matrix: 
     })
 }
 
-// Per-plane structure: mirrors Clay's actual layout (RS over `sub`-byte planes),
+// Per-plane structure: mirrors the production layout (RS over `sub`-byte planes),
 // but the (i,j) swizzle tables are precomputed ONCE and reused across planes.
 #[wasm_bindgen]
 pub fn encode_plane_simd(data: &[u8], k: usize, m: usize, row: usize, sub: usize, matrix: &[u8]) -> Vec<u8> {

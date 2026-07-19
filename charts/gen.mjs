@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+// One chart: tape's speedup over firedancer, one line per shape, across shard
+// size, from the x86 Zen 5 Turin flagship numbers (BENCH-RESULTS.md).
+//
+// Dependency-free. Emits charts/speedup.svg (renders directly in a GitHub
+// README via <img>) plus charts/index.html for local preview. Regenerate:
+//   node charts/gen.mjs
+//
+// Colors validated with the dataviz skill on the dark navy surface #11151d:
+// the four hues clear the normal-vision floor (19.3) and >= 3:1 contrast; CVD
+// sits in the 6-8 band, covered by direct labels + the legend. Five series is
+// one past the safe four, so the fifth line reuses a hue as a dashed line
+// (color + style), never a fifth confusable hue.
+
+import { writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const OUT = dirname(fileURLToPath(import.meta.url));
+
+const C = {
+  blue: '#3987e5',
+  green: '#008300',
+  magenta: '#d55181',
+  yellow: '#c98500',
+  panel: '#11151d',
+  ink: '#eef2f8',
+  sub: '#aab4c4',
+  muted: '#6b7789',
+  baseline: '#2a3242',
+};
+const FONT = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
+
+// x86 Zen 5 Turin, MiB/s single-thread
+const SIZE_LABELS = ['100 B', '1 KB', '10 KB', '100 KB', '1 MB'];
+const XV = [100, 1000, 10000, 100000, 1000000];
+// The two production shapes share the blue hue (solid / dashed); the runtime
+// shapes take the other three validated hues.
+const SERIES = [
+  { name: '(7,13)',  color: C.blue,    dash: false, tape: [22275, 44719, 45837, 30248, 13272], fd: [8474, 15435, 17089, 15248, 7348] },
+  { name: '(10,10)', color: C.blue,    dash: true,  tape: [26100, 79741, 55259, 45324, 39811], fd: [12020, 22178, 22397, 22073, 21191] },
+  { name: '(14,14)', color: C.green,   dash: false, tape: [24720, 53607, 47055, 34423, 36799], fd: [15072, 28407, 26116, 26238, 25890] },
+  { name: '(16,16)', color: C.magenta, dash: false, tape: [33343, 70166, 58603, 34811, 27325], fd: [15744, 31131, 33788, 27858, 26772] },
+  { name: '(18,6)',  color: C.yellow,  dash: false, tape: [73127, 114447, 93750, 61036, 51317], fd: [17072, 30213, 32973, 27852, 28830] },
+];
+for (const s of SERIES) s.spd = s.tape.map((t, i) => t / s.fd[i]);
+
+const log10 = (x) => Math.log(x) / Math.LN10;
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function txt(x, y, s, o = {}) {
+  const { fill = C.muted, size = 12.5, weight = 400, anchor = 'start' } = o;
+  return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" fill="${fill}" font-family='${FONT}' font-size="${size}" font-weight="${weight}" text-anchor="${anchor}">${esc(s)}</text>`;
+}
+function niceAxis(maxVal) {
+  const raw = maxVal / 5;
+  const mag = Math.pow(10, Math.floor(log10(raw)));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  const max = Math.ceil(maxVal / step) * step;
+  const ticks = [];
+  for (let t = 0; t <= max + step * 1e-6; t += step) ticks.push(t);
+  return { max, ticks };
+}
+
+function chart() {
+  const W = 920, H = 420;
+  const PL = 60, PR = 92, PT = 52, PB = 84;
+  const x0 = PL, x1 = W - PR, y0 = H - PB, y1 = PT;
+  const xAt = (v) => x0 + ((log10(v) - log10(100)) / (log10(1e6) - log10(100))) * (x1 - x0);
+  const ax = niceAxis(Math.max(...SERIES.flatMap((s) => s.spd)));
+  const yAt = (v) => y0 - (v / ax.max) * (y0 - y1);
+
+  let s = '';
+  s += `<rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" rx="14" fill="${C.panel}" stroke="#ffffff" stroke-opacity="0.08"/>`;
+  s += txt(PL, 28, 'Encode throughput vs firedancer', { fill: C.ink, size: 17, weight: 600 });
+  s += txt(x1, 28, 'speedup = tape ÷ firedancer · x86 Zen 5 · single-thread', { fill: C.muted, size: 12, anchor: 'end' });
+
+  for (const t of ax.ticks) {
+    const y = yAt(t);
+    s += `<line x1="${x0}" y1="${y.toFixed(1)}" x2="${x1}" y2="${y.toFixed(1)}" stroke="#ffffff" stroke-opacity="${t === 0 ? 0 : 0.06}"/>`;
+    s += txt(x0 - 12, y + 4, `${t}x`, { anchor: 'end', size: 12 });
+  }
+  // parity reference at 1.0x
+  const py = yAt(1);
+  s += `<line x1="${x0}" y1="${py.toFixed(1)}" x2="${x1}" y2="${py.toFixed(1)}" stroke="${C.muted}" stroke-width="1.25" stroke-dasharray="4 4"/>`;
+  s += txt(x0 + 6, py - 8, 'parity (1.0x)', { size: 11, fill: C.muted });
+  s += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y0}" stroke="${C.baseline}"/>`;
+  XV.forEach((v, i) => {
+    const x = xAt(v);
+    s += `<line x1="${x.toFixed(1)}" y1="${y0}" x2="${x.toFixed(1)}" y2="${y0 + 5}" stroke="${C.baseline}"/>`;
+    s += txt(x, y0 + 22, SIZE_LABELS[i], { anchor: 'middle', size: 12 });
+  });
+
+  // series
+  for (const ser of SERIES) {
+    const pts = ser.spd.map((v, i) => [xAt(XV[i]), yAt(v)]);
+    const dash = ser.dash ? ' stroke-dasharray="7 5"' : '';
+    s += `<polyline fill="none" stroke="${ser.color}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"${dash} points="${pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}"/>`;
+    for (const [px, py2] of pts) s += `<circle cx="${px.toFixed(1)}" cy="${py2.toFixed(1)}" r="3.6" fill="${ser.color}" stroke="${C.panel}" stroke-width="1.5"/>`;
+  }
+
+  // right-end direct labels, de-collided
+  const ends = SERIES.map((ser) => ({ y: yAt(ser.spd[4]), name: ser.name, color: ser.color }))
+    .sort((a, b) => a.y - b.y);
+  const MIN = 15;
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < MIN) ends[i].y = ends[i - 1].y + MIN;
+  for (const e of ends) s += txt(x1 + 10, e.y + 4, e.name, { fill: e.color, size: 12.5, weight: 600 });
+
+  // peak callout on the top series at its max
+  const top = SERIES.reduce((a, b) => (Math.max(...b.spd) > Math.max(...a.spd) ? b : a));
+  const pk = top.spd.indexOf(Math.max(...top.spd));
+  s += txt(xAt(XV[pk]), yAt(top.spd[pk]) - 11, `${top.spd[pk].toFixed(1)}x`, { fill: C.ink, size: 12.5, weight: 600, anchor: pk === 0 ? 'start' : 'middle' });
+
+  // legend (solid vs dashed shown)
+  const ly = H - 30;
+  let lx = PL;
+  for (const ser of SERIES) {
+    const dash = ser.dash ? ' stroke-dasharray="6 4"' : '';
+    s += `<line x1="${lx}" y1="${ly}" x2="${lx + 24}" y2="${ly}" stroke="${ser.color}" stroke-width="2.5" stroke-linecap="round"${dash}/>`;
+    s += txt(lx + 32, ly + 4, ser.name, { fill: C.sub, size: 12.5 });
+    lx += 32 + ser.name.length * 8.5 + 26;
+  }
+  s += txt(PL, ly + 26, 'blue = production shapes (7,13) solid, (10,10) dashed', { fill: C.muted, size: 11 });
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img">${s}</svg>`;
+}
+
+const svg = chart();
+writeFileSync(join(OUT, 'speedup.svg'), svg);
+writeFileSync(join(OUT, 'index.html'), `<!doctype html><meta charset="utf-8"><title>bench chart</title><style>body{margin:0;background:#0a0d13;padding:28px;display:flex;justify-content:center}svg{max-width:100%;height:auto}</style>${svg}`);
+console.log('wrote charts/speedup.svg + index.html');

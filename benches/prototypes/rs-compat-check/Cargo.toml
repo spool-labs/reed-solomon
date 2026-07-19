@@ -4,9 +4,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-# reed-solomon-erasure with its C-SIMD backend (== what Clay/Shelby use today)
 reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
-# Firedancer C RS via FFI. run.sh clones it (with submodules) next to this crate.
 firedancer-reed-solomon = { path = "../firedancer-reed-solomon" }
 rand = "0.8"
 
