@@ -1,5 +1,9 @@
 # tape-reed-solomon
 
+[![Crates.io](https://img.shields.io/crates/v/tape-reed-solomon.svg)](https://crates.io/crates/tape-reed-solomon)
+[![Documentation](https://docs.rs/tape-reed-solomon/badge.svg)](https://docs.rs/tape-reed-solomon)
+[![License](https://img.shields.io/crates/l/tape-reed-solomon.svg)](LICENSE)
+
 Pure-Rust Reed-Solomon erasure coding over **GF(2^8)** (primitive polynomial
 `0x11d`), with SIMD-accelerated field arithmetic.
 
