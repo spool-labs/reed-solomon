@@ -6,7 +6,7 @@
 //! rs.reconstruct(&mut shards)?; // shards: Vec<(&mut [u8], bool)>
 //! ```
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::errors::Error;
 use crate::gf;
@@ -147,7 +147,7 @@ pub struct ReedSolomon {
     #[cfg(fft_enabled)]
     staged: Option<Arc<StagedProgram>>,
 
-    decode_plans: Mutex<PlanCache>,
+    decode_plans: RwLock<PlanCache>,
 }
 
 impl ReedSolomon {
@@ -191,7 +191,7 @@ impl ReedSolomon {
             parity: RowTables::new(parity_rows, data_shards),
             #[cfg(fft_enabled)]
             staged: Self::build_staged(data_shards, parity_shards),
-            decode_plans: Mutex::new(Vec::new()),
+            decode_plans: RwLock::new(Vec::new()),
         })
     }
 
@@ -273,7 +273,50 @@ impl ReedSolomon {
         self.check_equal_lengths(shards)?;
 
         let (input, output) = shards.split_at_mut(self.data_shard_count);
+        self.encode_into(input, output)
+    }
 
+    /// Encode with the data and parity shards in separate slices, matching
+    /// `reed-solomon-erasure`'s `encode_sep`: `data` is read-only and each
+    /// `parity` shard is overwritten. All shards must share one length.
+    ///
+    /// Byte-identical to [`encode`](Self::encode) for the same data.
+    pub fn encode_sep<T: AsRef<[u8]>, U: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        data: &[T],
+        parity: &mut [U],
+    ) -> Result<(), Error> {
+        if data.len() != self.data_shard_count {
+            return Err(if data.len() < self.data_shard_count {
+                Error::TooFewDataShards
+            } else {
+                Error::TooManyDataShards
+            });
+        }
+        if parity.len() != self.parity_shard_count {
+            return Err(if parity.len() < self.parity_shard_count {
+                Error::TooFewParityShards
+            } else {
+                Error::TooManyParityShards
+            });
+        }
+        let len = data[0].as_ref().len();
+        let uneven = data.iter().any(|s| s.as_ref().len() != len)
+            || parity.iter().any(|s| s.as_ref().len() != len);
+        if uneven {
+            return Err(Error::IncorrectShardSize);
+        }
+        self.encode_into(data, parity)
+    }
+
+    /// Shared encode core: parity outputs from the data inputs, routed through
+    /// the generated/staged FFT programs or the fused matrix kernels, all
+    /// byte-identical. Callers guarantee the shard counts and equal lengths.
+    fn encode_into<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+        &self,
+        input: &[In],
+        output: &mut [Out],
+    ) -> Result<(), Error> {
         // The production shapes run their generated FFT programs and any
         // other profitable shape runs its staged program; both need a
         // fraction of the schoolbook multiplies. Remaining shapes and
@@ -533,23 +576,28 @@ impl ReedSolomon {
     }
 
     /// Fetch the cached plan for a presence pattern, building it on first use
+    ///
+    /// The hit path takes only a shared read lock and does not reorder the
+    /// cache, so many threads sharing one codec (Agave's parallel receive path)
+    /// reconstruct concurrently instead of serializing on an exclusive lock.
     fn plan_for(&self, presence: PresenceMask) -> Result<Arc<DecodePlan>, Error> {
         {
-            let mut plans = self.decode_plans.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            for position in 0..plans.len() {
-                if plans[position].0 == presence {
-                    // Keep hot patterns at the front so scans stay short.
-                    let entry = plans.remove(position);
-                    let plan = entry.1.clone();
-                    plans.insert(0, entry);
-                    return Ok(plan);
+            let plans = self.decode_plans.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (mask, plan) in plans.iter() {
+                if *mask == presence {
+                    return Ok(plan.clone());
                 }
             }
         }
 
-        // Built outside the lock; a racing builder just does redundant work.
+        // Miss: build outside the lock, then take the write lock to insert. A
+        // thread that raced us to the same pattern already inserted it, so reuse
+        // that entry and drop our redundant build.
         let plan = Arc::new(self.build_plan(presence)?);
-        let mut plans = self.decode_plans.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut plans = self.decode_plans.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, existing)) = plans.iter().find(|(mask, _)| *mask == presence) {
+            return Ok(existing.clone());
+        }
         plans.insert(0, (presence, plan.clone()));
         plans.truncate(DECODE_PLAN_CACHE_LIMIT);
         Ok(plan)
@@ -667,7 +715,7 @@ impl ReedSolomon {
 
 impl Clone for ReedSolomon {
     fn clone(&self) -> ReedSolomon {
-        let plans = self.decode_plans.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let plans = self.decode_plans.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         ReedSolomon {
             data_shard_count: self.data_shard_count,
             parity_shard_count: self.parity_shard_count,
@@ -676,7 +724,7 @@ impl Clone for ReedSolomon {
             parity: self.parity.clone(),
             #[cfg(fft_enabled)]
             staged: self.staged.clone(),
-            decode_plans: Mutex::new(plans.clone()),
+            decode_plans: RwLock::new(plans.clone()),
         }
     }
 }
@@ -908,6 +956,29 @@ mod tests {
                 let mut c = base.clone();
                 rs.encode_scalar(&mut c).unwrap();
                 assert_eq!(a, c, "encode_scalar != encode k={k} m={m} len={len}");
+            }
+        }
+    }
+
+    // encode_sep (separate data/parity slices, rse-compatible) produces the
+    // same parity bytes as the combined encode, including Agave's (32,32)/987
+    #[test]
+    fn encode_sep_matches_encode() {
+        for &(k, m) in &[(7usize, 13usize), (10, 10), (32, 32), (4, 2), (18, 6)] {
+            let rs = ReedSolomon::new(k, m).unwrap();
+            for &len in &[16usize, 100, 987, 1024] {
+                let data = deterministic_data(k * len, 0x1234_5678);
+                let data_shards: Vec<Vec<u8>> =
+                    (0..k).map(|j| data[j * len..(j + 1) * len].to_vec()).collect();
+
+                let mut combined = data_shards.clone();
+                combined.extend((0..m).map(|_| vec![0u8; len]));
+                rs.encode(&mut combined).unwrap();
+
+                let mut parity = vec![vec![0u8; len]; m];
+                rs.encode_sep(&data_shards, &mut parity).unwrap();
+
+                assert_eq!(&combined[k..], &parity[..], "k={k} m={m} len={len}");
             }
         }
     }

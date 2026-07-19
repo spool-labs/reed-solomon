@@ -34,14 +34,17 @@ const FONT = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospa
 // x86 Zen 5 Turin, MiB/s single-thread
 const SIZE_LABELS = ['100 B', '1 KB', '10 KB', '100 KB', '1 MB'];
 const XV = [100, 1000, 10000, 100000, 1000000];
-// The two production shapes share the blue hue (solid / dashed); the runtime
-// shapes take the other three validated hues.
+// Two dashed pairings keep 6 shapes on 4 CVD-safe hues: blue = (7,13) solid /
+// (10,10) dashed; yellow = (18,6) solid / (32,32) dashed. (32,32) is Agave's
+// shred FEC shape and firedancer's own hand-tuned shape, so it is the lowest
+// line, yet tape still leads at every size. One c4d Zen 5 Turin run.
 const SERIES = [
-  { name: '(7,13)',  color: C.blue,    dash: false, tape: [22275, 44719, 45837, 30248, 13272], fd: [8474, 15435, 17089, 15248, 7348] },
-  { name: '(10,10)', color: C.blue,    dash: true,  tape: [26100, 79741, 55259, 45324, 39811], fd: [12020, 22178, 22397, 22073, 21191] },
-  { name: '(14,14)', color: C.green,   dash: false, tape: [24720, 53607, 47055, 34423, 36799], fd: [15072, 28407, 26116, 26238, 25890] },
-  { name: '(16,16)', color: C.magenta, dash: false, tape: [33343, 70166, 58603, 34811, 27325], fd: [15744, 31131, 33788, 27858, 26772] },
-  { name: '(18,6)',  color: C.yellow,  dash: false, tape: [73127, 114447, 93750, 61036, 51317], fd: [17072, 30213, 32973, 27852, 28830] },
+  { name: '(7,13)',  color: C.blue,    dash: false, tape: [29419, 46959, 44169, 32131, 12790], fd: [8113, 15010, 17194, 15728, 7210] },
+  { name: '(10,10)', color: C.blue,    dash: true,  tape: [32775, 76241, 56210, 43946, 42848], fd: [11484, 21146, 22088, 22315, 21587] },
+  { name: '(14,14)', color: C.green,   dash: false, tape: [32987, 53120, 46959, 35577, 34225], fd: [12788, 28521, 27480, 26287, 26535] },
+  { name: '(16,16)', color: C.magenta, dash: false, tape: [39853, 57585, 56039, 36047, 28537], fd: [13504, 31667, 34451, 29496, 26989] },
+  { name: '(18,6)',  color: C.yellow,  dash: false, tape: [70816, 115281, 94649, 65136, 51166], fd: [17173, 30458, 33807, 28612, 28437] },
+  { name: '(32,32)', color: C.yellow,  dash: true,  tape: [22963, 31585, 32404, 23767, 14665], fd: [12303, 23713, 21179, 20152, 13123] },
 ];
 for (const s of SERIES) s.spd = s.tape.map((t, i) => t / s.fd[i]);
 
@@ -91,6 +94,11 @@ function chart() {
     s += txt(x, y0 + 22, SIZE_LABELS[i], { anchor: 'middle', size: 12 });
   });
 
+  // Agave shred-size marker (987 B, essentially at the 1 KB tick)
+  const ax987 = xAt(987);
+  s += `<line x1="${ax987.toFixed(1)}" y1="${(y1 - 4).toFixed(1)}" x2="${ax987.toFixed(1)}" y2="${y0}" stroke="${C.sub}" stroke-width="1" stroke-dasharray="3 4" stroke-opacity="0.5"/>`;
+  s += txt(ax987, y1 - 8, '987 B · Agave shred', { anchor: 'middle', size: 11, fill: C.sub });
+
   // series
   for (const ser of SERIES) {
     const pts = ser.spd.map((v, i) => [xAt(XV[i]), yAt(v)]);
@@ -120,7 +128,7 @@ function chart() {
     s += txt(lx + 32, ly + 4, ser.name, { fill: C.sub, size: 12.5 });
     lx += 32 + ser.name.length * 8.5 + 26;
   }
-  s += txt(PL, ly + 26, 'blue = production shapes (7,13) solid, (10,10) dashed', { fill: C.muted, size: 11 });
+  s += txt(PL, ly + 26, 'dashed shares a hue: blue (7,13)/(10,10), yellow (18,6)/(32,32). (32,32) is Agave shred', { fill: C.muted, size: 11 });
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img">${s}</svg>`;
 }

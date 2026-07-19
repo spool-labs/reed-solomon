@@ -837,6 +837,7 @@ mod tests {
             (14, 14, "14_14"),
             (16, 16, "16_16"),
             (18, 6, "18_6"),
+            (32, 32, "32_32"), // Agave shred FEC shape, 987-byte shards
         ];
         println!();
         println!("/// Every shape with a generated program; routing and the staged");

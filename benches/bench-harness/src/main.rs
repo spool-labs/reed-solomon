@@ -20,9 +20,11 @@ use tape_reed_solomon::ReedSolomon as Tape;
 // RS original_count=k=7). (10,10) kept for continuity with earlier runs.
 const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10)];
 // production-reachable shapes beyond the two production ones, e.g. a profile
-// (20,6,19) -> RS(14,14) through shortening; all five carry generated
-// programs now.
-const EXTRA_SHAPES: &[(usize, usize)] = &[(14, 14), (16, 16), (18, 6), (64, 64)];
+// (20,6,19) -> RS(14,14) through shortening. (32,32) is Agave's turbine shred
+// FEC shape; (128,128) and (32,96) are Anza's requested evolution shapes
+// (agave#9495), where 128:128 = 256 total is the exact GF(2^8) ceiling.
+const EXTRA_SHAPES: &[(usize, usize)] =
+    &[(14, 14), (16, 16), (18, 6), (32, 32), (64, 64), (128, 128), (32, 96)];
 // per-plane (100 B–10 KB) through full-row / large (100 KB–4 MiB = sia's sweet spot).
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000, 4_194_304];
 

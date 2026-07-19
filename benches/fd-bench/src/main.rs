@@ -14,8 +14,11 @@ use std::time::Instant;
 use tape_reed_solomon::ReedSolomon as Tape;
 
 // The two generated production shapes, then runtime shapes that exercise the
-// staged and fused paths (legal production profiles reach them through shortening).
-const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10), (14, 14), (16, 16), (18, 6)];
+// staged and fused paths. (32,32) is Agave's turbine shred shape; (128,128) and
+// (32,96) are Anza's evolution shapes (agave#9495) that exceed firedancer's
+// 67-parity cap, so fd reports them unsupported.
+const SHAPES: &[(usize, usize)] =
+    &[(7, 13), (10, 10), (14, 14), (16, 16), (18, 6), (32, 32), (128, 128), (32, 96)];
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000];
 
 fn base(k: usize, m: usize, sz: usize, rng: &mut StdRng) -> Vec<Vec<u8>> {
