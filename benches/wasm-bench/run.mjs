@@ -1,14 +1,17 @@
 // wasm simd128 encode bench + differential (Node 24). Build first:
 //   RUSTFLAGS="-C target-feature=+simd128" wasm-pack build wasm-bench --target nodejs --release
 // then: node wasm-bench/run.mjs
-import { setup, run_fused, run_scalar, verify } from './pkg/wasm_bench.js';
+import { setup, run_fused, run_scalar, run_reconstruct, verify, verify_reconstruct } from './pkg/wasm_bench.js';
 
 // Differential first: fused `encode` must equal `encode_scalar` byte-for-byte.
 const bad = verify();
 console.log(`differential (fused encode == scalar, specialised + fallback shapes, tail lengths): ${bad === 0 ? 'PASS' : `FAIL (${bad} mismatched bytes)`}`);
 if (bad !== 0) process.exit(1);
+const badR = verify_reconstruct();
+console.log(`reconstruct gate (erase up to m, rebuild == original, five shapes): ${badR === 0 ? 'PASS' : `FAIL (${badR} mismatched bytes)`}`);
+if (badR !== 0) process.exit(1);
 
-const SHAPES = [[7, 13], [10, 10]];
+const SHAPES = [[7, 13], [10, 10], [16, 16], [14, 14], [18, 6]];
 // PR-70 per-plane range (~100 B – 1.4 KB at the 1 MB stripe cap), plus a large one.
 const SIZES = [100, 256, 512, 1024, 1430, 10000];
 
@@ -35,3 +38,12 @@ for (const [k, m] of SHAPES) {
   }
 }
 console.log('\nfused = encode (cached tables + multi-output + overlapped tail), the default wasm path.');
+
+for (const [k, m] of SHAPES) {
+  console.log(`\n--- (${k},${m}) reconstruct, worst case ${m} erased, MiB/s (Node 24) ---`);
+  console.log(`${pad('size', 6)} ${pad('reconstruct', 12)}`);
+  for (const sz of SIZES) {
+    const v = measure((iters) => run_reconstruct(iters, m), k, m, sz);
+    console.log(`${pad(sz, 6)} ${pad(v.toFixed(0), 12)}`);
+  }
+}

@@ -1,4 +1,4 @@
-//! Scalar GF(2^8) slice-multiply kernel — the reference implementation.
+//! Scalar GF(2^8) slice-multiply kernel: the reference implementation.
 
 use crate::galois::MUL_TABLE;
 

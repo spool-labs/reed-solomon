@@ -34,7 +34,7 @@ const fn gen_exp_table() -> [u8; EXP_TABLE_SIZE] {
     result
 }
 
-const fn gen_mul_table() -> [[u8; FIELD_SIZE]; FIELD_SIZE] {
+pub(crate) const fn gen_mul_table() -> [[u8; FIELD_SIZE]; FIELD_SIZE] {
     let log_table = gen_log_table();
     let exp_table = gen_exp_table();
     let mut result = [[0u8; FIELD_SIZE]; FIELD_SIZE];

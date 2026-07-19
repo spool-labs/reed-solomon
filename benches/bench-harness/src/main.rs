@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Head-to-head RS **encode** throughput: tape-reed-solomon vs sia_reed_solomon
-//! vs reed-solomon-erasure — the last WITH `simd-accel`, i.e. the C SIMD backend
+//! vs reed-solomon-erasure, the last WITH `simd-accel`, i.e. the C SIMD backend
 //! Clay actually ships on native (C NEON on aarch64, C AVX2/etc. on x86_64). So
 //! every speedup below is the REAL native delta, not the scalar-rse number.
 //!
@@ -9,6 +9,7 @@
 //! Run here:    cargo run --release
 //! Run on GCP:  ./run.sh     (see README.md)
 
+use additive_fft_reed_solomon::{Gf2p8_11d, Rs as Afft};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use reed_solomon_erasure::galois_8::ReedSolomon as Rse;
 use sia_reed_solomon::ReedSolomon as Sia;
@@ -18,6 +19,10 @@ use tape_reed_solomon::ReedSolomon as Tape;
 // (7,13) = tape-internal PRODUCTION shape (ClayParams::DEFAULT n=20,k=7,d=16 -> m=13,
 // RS original_count=k=7). (10,10) kept for continuity with earlier runs.
 const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10)];
+// Clay-reachable shapes beyond the two production ones, e.g. ClayParams
+// (20,6,19) -> RS(14,14) through shortening; all five carry generated
+// programs now.
+const EXTRA_SHAPES: &[(usize, usize)] = &[(14, 14), (16, 16), (18, 6), (64, 64)];
 // per-plane (100 B–10 KB) through full-row / large (100 KB–4 MiB = sia's sweet spot).
 const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000, 4_194_304];
 
@@ -103,17 +108,51 @@ fn mib(payload: f64, iters: usize, secs: f64) -> f64 {
     payload * iters as f64 / (1024.0 * 1024.0) / secs
 }
 
+/// additive-fft-reed-solomon at the benched shape, when representable: its
+/// codec is const-generic with power-of-two N and T, so most of our shapes
+/// do not exist for it. Different wire (Cantor basis), so throughput only.
+fn afft_encode_mib(k: usize, m: usize, sz: usize, warmup: usize, iters: usize) -> Option<f64> {
+    match (k, m) {
+        (16, 16) => Some(afft_run::<32, 16>(k, sz, warmup, iters)),
+        (64, 64) => Some(afft_run::<128, 64>(k, sz, warmup, iters)),
+        _ => None,
+    }
+}
+
+fn afft_run<const N: usize, const T: usize>(
+    k: usize,
+    sz: usize,
+    warmup: usize,
+    iters: usize,
+) -> f64 {
+    let rs = Afft::<N, T>::new();
+    let mut rng = StdRng::seed_from_u64(0xAFF7);
+    let mut message = vec![Gf2p8_11d::from(0u8); k * sz];
+    for symbol in message.iter_mut() {
+        *symbol = Gf2p8_11d::from((rng.next_u32() & 0xff) as u8);
+    }
+    let mut parity = vec![Gf2p8_11d::from(0u8); T * sz];
+    let mut workspace = vec![Gf2p8_11d::from(0u8); T * sz];
+    let elapsed = secs(
+        || rs.encode_systematic_sharded(&message, &mut parity, &mut workspace, sz),
+        warmup,
+        iters,
+    );
+    mib((k * sz) as f64, iters, elapsed)
+}
+
 fn run_shape(k: usize, m: usize) {
-    println!("\n--- shape ({k},{m}): {k} data + {m} parity — payload MiB/s (divide by rse(C) for speedup) ---");
+    let route = Tape::new(k, m).unwrap().encode_route(10_000);
+    println!("\n--- shape ({k},{m}): {k} data + {m} parity [tape route: {route}] — payload MiB/s (divide by rse(C) for speedup) ---");
     #[cfg(target_arch = "x86_64")]
     println!(
-        "{:<7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>11} {:>9} {:>6}",
-        "size", "rse(C)", "ssse3", "avx2", "avx512", "gfni1", "gfniFused", "sia", "iters"
+        "{:<7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>11} {:>9} {:>9} {:>6}",
+        "size", "rse(C)", "ssse3", "avx2", "avx512", "gfni1", "gfniFused", "sia", "afft", "iters"
     );
     #[cfg(not(target_arch = "x86_64"))]
     println!(
-        "{:<7} {:>10} {:>10} {:>10} {:>6}",
-        "size", "rse(C)", "tape", "sia", "iters"
+        "{:<7} {:>10} {:>10} {:>10} {:>10} {:>6}",
+        "size", "rse(C)", "tape", "sia", "afft", "iters"
     );
 
     let mut rng = StdRng::seed_from_u64(0x5EED);
@@ -147,7 +186,7 @@ fn run_shape(k: usize, m: usize) {
 
         #[cfg(target_arch = "x86_64")]
         {
-            // ssse3, avx2, avx512-nibble, gfni-single — each forced, same blocked loop.
+            // ssse3, avx2, avx512-nibble, gfni-single: each forced, same blocked loop.
             let mut kv = [0f64; 4];
             for kind in 0..4u8 {
                 let mut f = b.clone();
@@ -162,18 +201,24 @@ fn run_shape(k: usize, m: usize) {
             assert!(par(&fu), "fused mismatch ({k},{m}) sz={sz}");
             let mut s = b.clone();
             let v_fu = m1(secs(|| { tape.encode_fused(&mut s).unwrap(); }, warmup, iters));
+            let afft = afft_encode_mib(k, m, sz, warmup, iters)
+                .map(|v| format!("{v:.0}"))
+                .unwrap_or_else(|| "-".into());
             println!(
-                "{:<7} {:>9.0} {:>9.0} {:>9.0} {:>9.0} {:>9.0} {:>11.0} {:>9.0} {:>6}",
-                size_label(sz), v_rse, kv[0], kv[1], kv[2], kv[3], v_fu, v_sia, iters
+                "{:<7} {:>9.0} {:>9.0} {:>9.0} {:>9.0} {:>9.0} {:>11.0} {:>9.0} {:>9} {:>6}",
+                size_label(sz), v_rse, kv[0], kv[1], kv[2], kv[3], v_fu, v_sia, afft, iters
             );
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
             let mut s = b.clone();
             let v_tape = m1(secs(|| { tape.encode(&mut s).unwrap(); }, warmup, iters));
+            let afft = afft_encode_mib(k, m, sz, warmup, iters)
+                .map(|v| format!("{v:.0}"))
+                .unwrap_or_else(|| "-".into());
             println!(
-                "{:<7} {:>10.0} {:>10.0} {:>10.0} {:>6}",
-                size_label(sz), v_rse, v_tape, v_sia, iters
+                "{:<7} {:>10.0} {:>10.0} {:>10.0} {:>10} {:>6}",
+                size_label(sz), v_rse, v_tape, v_sia, afft, iters
             );
         }
     }
@@ -184,7 +229,7 @@ fn run_shape(k: usize, m: usize) {
 /// k*size, matching the encode tables. sia has no comparable slice-reconstruct
 /// entry point, so it sits this table out.
 fn run_reconstruct(k: usize, m: usize) {
-    let sizes: &[usize] = &[1_000, 10_000, 100_000, 1_000_000];
+    let sizes: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000];
 
     // Worst case erases as much data as the code can survive.
     let single: Vec<usize> = vec![0];
@@ -295,12 +340,17 @@ fn main() {
     for &(k, m) in SHAPES {
         run_shape(k, m);
     }
+    for &(k, m) in EXTRA_SHAPES {
+        run_shape(k, m);
+    }
     for &(k, m) in SHAPES {
         run_reconstruct(k, m);
     }
     println!(
         "\npayload = data bytes only (k*size); speedup = column / rse(C). x86 columns:\n\
          ssse3/avx2/avx512 = nibble-split single-output kernels; gfni1 = GFNI single-output;\n\
-         gfniFused = GFNI multi-output (encode_fused). aarch64: tape = dispatched encode."
+         gfniFused = GFNI multi-output (encode_fused). aarch64: tape = dispatched encode.\n\
+         afft = additive-fft-reed-solomon (Cantor basis, different wire, no parity gate;\n\
+         only power-of-two shapes exist for it; scalar LUT kernel off GFNI hosts)."
     );
 }

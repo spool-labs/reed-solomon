@@ -10,9 +10,6 @@ use core::arch::aarch64::*;
 
 use super::scalar;
 
-/// Upper bound on data + parity shards, so input pointers fit a stack array.
-const MAX_SHARDS: usize = 256;
-
 /// Fused encode of all parity outputs. `tables` holds, per (output, input)
 /// pair, a 16-byte lo table followed by a 16-byte hi table. Works for any
 /// shape; shards shorter than 16 bytes go through the scalar kernel.
@@ -157,10 +154,6 @@ macro_rules! tiled_kernel {
             let len = if k > 0 { input[0].as_ref().len() } else { 0 };
             let low_mask = vdupq_n_u8(0x0f);
             let tp = tables.as_ptr();
-            let mut in_ptr = [core::ptr::null::<u8>(); MAX_SHARDS];
-            for i in 0..k {
-                in_ptr[i] = input[i].as_ref().as_ptr();
-            }
             let out_ptr: [*mut u8; NOUT] = core::array::from_fn(|j| out[j].as_mut().as_mut_ptr());
 
             let mut pos = 0usize;
@@ -168,7 +161,7 @@ macro_rules! tiled_kernel {
                 let p = if pos + W <= len { pos } else { len - W };
                 let mut accs = [vdupq_n_u8(0); NOUT];
                 for i in 0..k {
-                    let v = vld1q_u8((*in_ptr.get_unchecked(i)).add(p));
+                    let v = vld1q_u8(input.get_unchecked(i).as_ref().as_ptr().add(p));
                     let lo_idx = vandq_u8(v, low_mask);
                     let hi_idx = vshrq_n_u8::<4>(v);
                     for j in 0..NOUT {

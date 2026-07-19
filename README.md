@@ -32,6 +32,22 @@ paths through per-architecture fused multi-output kernels. The scalar kernel
 is the reference; every SIMD kernel builds its tables from `galois::mul`, and
 per-backend differential tests pin them byte-identical to scalar.
 
+Encoding picks between three byte-identical routes per shape. Shapes on the
+generated list (`GENERATED_SHAPES`, currently (7,13), (10,10), (14,14),
+(16,16), and (18,6)) run generated Lin-Chung-Han FFT programs with a
+fraction of the schoolbook multiplies, fully register-resident on NEON, on
+GFNI hosts (64-byte strips where AVX-512 is present), and on wasm simd128.
+The coverage policy costs one line per shape: every shape that ships gets
+added to the generator list and registered, and the byte-identity tests do
+the rest. Any other shape is compiled at construction into a staged FFT
+program (block transforms plus glue over a stack register file) and routed
+there when measurement says it wins, currently power-of-two data counts
+with a decisive multiply saving. Everything else, and every sub-strip
+length, takes the fused matrix kernels. All three interpolate through points 0..k-1
+and evaluate at points k..n-1, exactly the code the matrix construction
+defines, so parity never depends on the route; `ReedSolomon::encode_route`
+reports the choice for a given shard length.
+
 | arch    | backend                                   | kernel              |
 |---------|-------------------------------------------|---------------------|
 | x86_64  | GFNI > AVX-512BW > AVX2 > SSSE3 > scalar   | `src/gf/x86.rs`     |

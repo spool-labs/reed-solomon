@@ -10,10 +10,6 @@ use super::scalar;
 use crate::galois;
 use core::arch::x86_64::*;
 
-/// Upper bound on data + parity shards (`ReedSolomon::new` rejects more), so input
-/// pointers fit a stack array and encode needs no per-call heap allocation.
-const MAX_SHARDS: usize = 256;
-
 /// Affine matrices (and raw coefficients) for a whole `NOUT x k` coefficient
 /// matrix, row-major. Held in memory deliberately so `vgf2p8affineqb` can fold
 /// the `set1_epi64` broadcast into its `m64bcst` operand.
@@ -54,7 +50,7 @@ impl AffineMatrices {
         *self.m.get_unchecked(j * self.k + i)
     }
 
-    /// Raw coefficient for (output `j`, input `i`) — used by the tail path.
+    /// Raw coefficient for (output `j`, input `i`), used by the tail path
     #[inline(always)]
     fn coeff(&self, j: usize, i: usize) -> u8 {
         self.coeffs[j * self.k + i]
@@ -80,10 +76,6 @@ pub unsafe fn dot_prod_gfni<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
     debug_assert_eq!(mats.k, k);
     debug_assert_eq!(out.len(), NOUT);
 
-    let mut ins = [core::ptr::null::<u8>(); MAX_SHARDS];
-    for i in 0..k {
-        ins[i] = input[i].as_ref().as_ptr();
-    }
     let out_ptr: [*mut u8; NOUT] = core::array::from_fn(|j| out[j].as_mut().as_mut_ptr());
 
     // Main loop: 128 bytes (2x64B) per block, all NOUT outputs at once.
@@ -94,8 +86,8 @@ pub unsafe fn dot_prod_gfni<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
         // Shard pairs: two affines combined with one ternlog (3-way XOR).
         let mut i = 0usize;
         while i + 2 <= k {
-            let p0 = ins.get_unchecked(i).add(b) as *const __m512i;
-            let p1 = ins.get_unchecked(i + 1).add(b) as *const __m512i;
+            let p0 = input.get_unchecked(i).as_ref().as_ptr().add(b) as *const __m512i;
+            let p1 = input.get_unchecked(i + 1).as_ref().as_ptr().add(b) as *const __m512i;
             let a = [_mm512_loadu_si512(p0), _mm512_loadu_si512(p0.add(1))];
             let c = [_mm512_loadu_si512(p1), _mm512_loadu_si512(p1.add(1))];
 
@@ -115,7 +107,7 @@ pub unsafe fn dot_prod_gfni<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
 
         // Odd shard out: plain xor-accumulate.
         if i < k {
-            let p = ins.get_unchecked(i).add(b) as *const __m512i;
+            let p = input.get_unchecked(i).as_ref().as_ptr().add(b) as *const __m512i;
             let a = [_mm512_loadu_si512(p), _mm512_loadu_si512(p.add(1))];
             for j in 0..NOUT {
                 let m = _mm512_set1_epi64(mats.at(base + j, i));
@@ -137,17 +129,44 @@ pub unsafe fn dot_prod_gfni<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
         b += 128;
     }
 
-    // Tail (< 128 bytes): GF addition is XOR, so accumulation order does not
-    // matter. Straight through the scalar kernel, since at tail lengths a table
-    // row lookup beats rebuilding per-coefficient SIMD tables.
+    // Tail: finish with overlapped 32-byte windows, so no shard longer than
+    // one window ever touches the scalar path. Overlapped bytes recompute to
+    // identical values because outputs are pure functions of inputs. Only
+    // shards shorter than one window fall through to the scalar kernel.
     if b < len {
-        for j in 0..NOUT {
-            for i in 0..k {
-                let cf = mats.coeff(base + j, i);
-                if i == 0 {
-                    scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
-                } else {
-                    scalar::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
+        if len >= 32 {
+            let mut pos = b;
+            loop {
+                let p = if pos + 32 <= len { pos } else { len - 32 };
+                for j in 0..NOUT {
+                    let mut acc = _mm256_setzero_si256();
+                    for i in 0..k {
+                        let m = _mm256_set1_epi64x(mats.at(base + j, i));
+                        let v = _mm256_loadu_si256(
+                            input.get_unchecked(i).as_ref().as_ptr().add(p) as *const __m256i,
+                        );
+                        acc = _mm256_xor_si256(acc, _mm256_gf2p8affine_epi64_epi8::<0>(v, m));
+                    }
+                    _mm256_storeu_si256(out_ptr[j].add(p) as *mut __m256i, acc);
+                }
+                if p + 32 >= len {
+                    break;
+                }
+                pos += 32;
+            }
+        } else {
+            for j in 0..NOUT {
+                for i in 0..k {
+                    let cf = mats.coeff(base + j, i);
+                    if i == 0 {
+                        scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
+                    } else {
+                        scalar::mul_slice_xor(
+                            &mut out[j].as_mut()[b..],
+                            &input[i].as_ref()[b..],
+                            cf,
+                        );
+                    }
                 }
             }
         }
@@ -210,7 +229,7 @@ impl NibbleTables {
         self.hi.as_ptr().add((j * self.k + i) * 32)
     }
 
-    /// Raw coefficient for (output `j`, input `i`) — used by the tail path.
+    /// Raw coefficient for (output `j`, input `i`), used by the tail path
     #[inline(always)]
     fn coeff(&self, j: usize, i: usize) -> u8 {
         self.coeffs[j * self.k + i]
@@ -236,10 +255,6 @@ pub unsafe fn dot_prod_avx2<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
     debug_assert_eq!(tab.k, k);
     debug_assert_eq!(out.len(), NOUT);
 
-    let mut ins = [core::ptr::null::<u8>(); MAX_SHARDS];
-    for i in 0..k {
-        ins[i] = input[i].as_ref().as_ptr();
-    }
     let out_ptr: [*mut u8; NOUT] = core::array::from_fn(|j| out[j].as_mut().as_mut_ptr());
     let mask = _mm256_set1_epi8(0x0f);
 
@@ -250,7 +265,7 @@ pub unsafe fn dot_prod_avx2<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
     while b + 32 <= len {
         let mut acc = [_mm256_setzero_si256(); NOUT];
         for i in 0..k {
-            let v = _mm256_loadu_si256(ins.get_unchecked(i).add(b) as *const __m256i);
+            let v = _mm256_loadu_si256(input.get_unchecked(i).as_ref().as_ptr().add(b) as *const __m256i);
             let lo_idx = _mm256_and_si256(v, mask);
             let hi_idx = _mm256_and_si256(_mm256_srli_epi16::<4>(v), mask);
             for j in 0..NOUT {
@@ -270,17 +285,43 @@ pub unsafe fn dot_prod_avx2<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>
         b += 32;
     }
 
-    // Tail (< 32 bytes): GF addition is XOR, so accumulation order does not
-    // matter. Straight through the scalar kernel, since at tail lengths a table
-    // row lookup beats rebuilding per-coefficient SIMD tables.
+    // Tail: one overlapped 32-byte window finishes any shard that covers a
+    // window; overlapped bytes recompute to identical values because outputs
+    // are pure functions of inputs. Shorter shards use the scalar kernel.
     if b < len {
-        for j in 0..NOUT {
-            for i in 0..k {
-                let cf = tab.coeff(base + j, i);
-                if i == 0 {
-                    scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
-                } else {
-                    scalar::mul_slice_xor(&mut out[j].as_mut()[b..], &input[i].as_ref()[b..], cf);
+        if len >= 32 {
+            let p = len - 32;
+            for j in 0..NOUT {
+                let mut acc = _mm256_setzero_si256();
+                for i in 0..k {
+                    let v = _mm256_loadu_si256(
+                        input.get_unchecked(i).as_ref().as_ptr().add(p) as *const __m256i,
+                    );
+                    let lo_idx = _mm256_and_si256(v, mask);
+                    let hi_idx = _mm256_and_si256(_mm256_srli_epi16::<4>(v), mask);
+                    let lo_t = _mm256_loadu_si256(tab.lo_ptr(base + j, i) as *const __m256i);
+                    let hi_t = _mm256_loadu_si256(tab.hi_ptr(base + j, i) as *const __m256i);
+                    let prod = _mm256_xor_si256(
+                        _mm256_shuffle_epi8(lo_t, lo_idx),
+                        _mm256_shuffle_epi8(hi_t, hi_idx),
+                    );
+                    acc = _mm256_xor_si256(acc, prod);
+                }
+                _mm256_storeu_si256(out_ptr[j].add(p) as *mut __m256i, acc);
+            }
+        } else {
+            for j in 0..NOUT {
+                for i in 0..k {
+                    let cf = tab.coeff(base + j, i);
+                    if i == 0 {
+                        scalar::mul_slice(&mut out[j].as_mut()[b..], &input[0].as_ref()[b..], cf);
+                    } else {
+                        scalar::mul_slice_xor(
+                            &mut out[j].as_mut()[b..],
+                            &input[i].as_ref()[b..],
+                            cf,
+                        );
+                    }
                 }
             }
         }
@@ -418,7 +459,7 @@ unsafe fn run_tile_avx2<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
 }
 
 /// Per-shard fallback used when the CPU lacks GFNI / AVX-512. Routes through the
-/// dispatch kernels (`super::mul_slice` — SIMD nibble/scalar as available).
+/// dispatch kernels (`super::mul_slice`, SIMD nibble/scalar as available).
 fn encode_fallback<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     gen_rows: &[Rows],
     data: &[In],
@@ -441,7 +482,7 @@ fn encode_fallback<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
 // 256-bit variant for the production shapes: at 256 bits all M outputs fit the
 // 32-register YMM file, so each input is loaded once per 32-byte block and reused
 // across every output (throughput stays flat past L2). An overlapped final block
-// (clamp pos = len-32, recompute — idempotent) removes the scalar tail.
+// (clamp pos = len-32, recompute; the overlap is idempotent) removes the scalar tail.
 
 /// `parity[o][..] = Σ_i gen_rows[o][i] * data[i][..]`, all outputs per 32-byte
 /// block, register-resident. Overlapped final block (no scalar tail).

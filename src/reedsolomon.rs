@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use crate::errors::Error;
 use crate::gf;
 use crate::gf::tables::RowTables;
+#[cfg(fft_enabled)]
+use crate::fft::{self, StagedProgram};
 use crate::matrix::Matrix;
 
 /// Verify recomputes parity in blocks of this size, so scratch stays cache
@@ -142,6 +144,9 @@ pub struct ReedSolomon {
     matrix: Matrix,
     parity: RowTables,
 
+    #[cfg(fft_enabled)]
+    staged: Option<Arc<StagedProgram>>,
+
     decode_plans: Mutex<PlanCache>,
 }
 
@@ -184,8 +189,67 @@ impl ReedSolomon {
             total_shard_count: total_shards,
             matrix,
             parity: RowTables::new(parity_rows, data_shards),
+            #[cfg(fft_enabled)]
+            staged: Self::build_staged(data_shards, parity_shards),
             decode_plans: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Compile the staged FFT program when it will actually pay off
+    ///
+    /// The generated straight-line executors own the production shapes, tiny
+    /// and non-power-of-two data counts gain nothing over the matrix path,
+    /// oversized register files fall back to it, and a shape only routes here
+    /// when its real multiply count clearly undercuts the schoolbook product.
+    #[cfg(fft_enabled)]
+    fn build_staged(data_shards: usize, parity_shards: usize) -> Option<Arc<StagedProgram>> {
+        // Route staged only for power-of-two data counts. Those shapes
+        // interpolate with a single inverse transform, few big stages, and
+        // almost no glue; measured on M4, (16,16) staged beats the fused
+        // kernels about 2x while non-power shapes like (14,14) lose to them,
+        // because their inter-stage glue serializes on store-to-load
+        // forwarding. Generated shapes and tiny counts also never reach the
+        // (relatively costly) program build, so gate all three before it.
+        let is_generated =
+            crate::fft_programs::GENERATED_SHAPES.contains(&(data_shards, parity_shards));
+        if is_generated || data_shards < 2 || !data_shards.is_power_of_two() {
+            return None;
+        }
+        let program = fft::build_staged_program(data_shards, parity_shards);
+        if program.register_count > fft::MAX_STAGED_REGISTERS {
+            return None;
+        }
+
+        // Take it only when the real multiply count clearly undercuts the
+        // schoolbook product. The margin is wider for the table-lookup
+        // multiply (NEON, wasm) than for the single-instruction GFNI affine.
+        #[cfg(any(target_arch = "aarch64", target_arch = "wasm32"))]
+        const MULT_MARGIN: usize = 3;
+        #[cfg(target_arch = "x86_64")]
+        const MULT_MARGIN: usize = 2;
+        if program.mult_count * MULT_MARGIN >= data_shards * parity_shards {
+            return None;
+        }
+        Some(Arc::new(program))
+    }
+
+    /// Bench and test introspection: the path this codec's encode takes for
+    /// the given shard length on this build
+    #[doc(hidden)]
+    pub fn encode_route(&self, shard_len: usize) -> &'static str {
+        #[cfg(fft_enabled)]
+        if gf::fft_active::eligible(shard_len) {
+            let generated = crate::fft_programs::GENERATED_SHAPES
+                .contains(&(self.data_shard_count, self.parity_shard_count));
+            if generated {
+                return "fft-generated";
+            }
+            if self.staged.is_some() {
+                return "fft-staged";
+            }
+        }
+        let _ = shard_len;
+        "fused-matrix"
     }
 
     pub fn data_shard_count(&self) -> usize {
@@ -209,6 +273,27 @@ impl ReedSolomon {
         self.check_equal_lengths(shards)?;
 
         let (input, output) = shards.split_at_mut(self.data_shard_count);
+
+        // The production shapes run their generated FFT programs and any
+        // other profitable shape runs its staged program; both need a
+        // fraction of the schoolbook multiplies. Remaining shapes and
+        // sub-strip lengths take the fused matrix path. All byte-identical.
+        #[cfg(fft_enabled)]
+        if gf::fft_active::eligible(input[0].as_ref().len()) {
+            if gf::fft_active::encode_generated(
+                self.data_shard_count,
+                self.parity_shard_count,
+                input,
+                output,
+            ) {
+                return Ok(());
+            }
+            if let Some(program) = &self.staged {
+                gf::fft_active::encode_staged(program, input, output);
+                return Ok(());
+            }
+        }
+
         self.parity.apply(input, output);
         Ok(())
     }
@@ -589,6 +674,8 @@ impl Clone for ReedSolomon {
             total_shard_count: self.total_shard_count,
             matrix: self.matrix.clone(),
             parity: self.parity.clone(),
+            #[cfg(fft_enabled)]
+            staged: self.staged.clone(),
             decode_plans: Mutex::new(plans.clone()),
         }
     }
@@ -679,6 +766,9 @@ fn scan_shards<Shard: ReconstructShard>(
 /// Gather the survivor and missing slices, then run the plan's fused tables:
 /// first the missing data from the survivors, then the missing parity from
 /// the completed data
+///
+/// Vec gathers measured faster than stack arrays here on both native and
+/// wasm; the allocator fast path beats initializing wide pointer arrays.
 fn reconstruct_with_plan<Shard: ReconstructShard>(
     data_shard_count: usize,
     plan: &DecodePlan,
@@ -797,10 +887,11 @@ mod tests {
     #[test]
     fn encode_fused_matches_encode() {
         // Fused encode must be byte-identical to the per-shard encode at the
-        // production shapes and a spread of shard sizes, including tail lengths.
-        for &(k, m) in &[(10usize, 10usize), (20, 10), (4, 2), (6, 4), (17, 17)] {
+        // production shapes and a spread of shard sizes, including tail lengths
+        // and both FFT strip boundaries.
+        for &(k, m) in &[(7usize, 13usize), (10, 10), (20, 10), (4, 2), (6, 4), (17, 17)] {
             let rs = ReedSolomon::new(k, m).unwrap();
-            for &len in &[1usize, 32, 63, 100, 1024, 10000, 65536] {
+            for &len in &[1usize, 15, 16, 17, 31, 32, 63, 100, 1024, 10000, 65536] {
                 let data = deterministic_data(k * len, 0x9E37_79B9);
                 let mut base: Vec<Vec<u8>> = (0..k)
                     .map(|j| data[j * len..(j + 1) * len].to_vec())
@@ -817,6 +908,34 @@ mod tests {
                 let mut c = base.clone();
                 rs.encode_scalar(&mut c).unwrap();
                 assert_eq!(a, c, "encode_scalar != encode k={k} m={m} len={len}");
+            }
+        }
+    }
+
+    // runtime shapes route through the staged program and match the scalar
+    // reference on every strip phase, including clay-derived shortened shapes
+    #[test]
+    fn staged_matches_scalar() {
+        for &(k, m) in &[
+            (12usize, 8usize),
+            (14, 14),
+            (16, 16),
+            (18, 6),
+            (24, 8),
+            (32, 32),
+        ] {
+            let rs = ReedSolomon::new(k, m).expect("codec should build");
+            for &len in &[15usize, 16, 17, 31, 32, 33, 100, 1000, 4096] {
+                let data = deterministic_data(k * len, 0x51A6ED);
+                let mut shards: Vec<Vec<u8>> = (0..k)
+                    .map(|j| data[j * len..(j + 1) * len].to_vec())
+                    .collect();
+                shards.extend((0..m).map(|_| vec![0u8; len]));
+
+                let mut expected = shards.clone();
+                rs.encode_scalar(&mut expected).expect("scalar encode should succeed");
+                rs.encode(&mut shards).expect("encode should succeed");
+                assert_eq!(shards, expected, "k={k} m={m} len={len}");
             }
         }
     }

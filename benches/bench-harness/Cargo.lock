@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "additive-fft-reed-solomon"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41a52212a3f225892782b55adf22d2c03ce62043ebe138c0a2fb349218cb29cc"
+dependencies = [
+ "additive-fft-reed-solomon-gf2p8",
+ "cfg-if",
+]
+
+[[package]]
+name = "additive-fft-reed-solomon-gf2p8"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d52bd08bc1cbd6f99f6afe7de6be4f818f79a93365f97c2986f8a9162d74a8b2"
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -265,6 +281,7 @@ version = "0.1.0"
 name = "tape-rs-bench-harness"
 version = "0.0.0"
 dependencies = [
+ "additive-fft-reed-solomon",
  "rand",
  "reed-solomon-erasure",
  "sia_reed_solomon",

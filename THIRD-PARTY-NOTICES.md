@@ -45,3 +45,15 @@ neon, and x86 kernels) are written from public technique — the nibble-split
 `pshufb`/swizzle multiply and the GFNI `gf2p8affineqb` affine map documented in
 Plank et al., Intel ISA-L, and Intel's GFNI whitepaper. The wasm128 kernel
 derives from tape's own clean-room `gfsimd` prototype.
+
+## FFT encode (original, from published technique)
+
+The fast encode for the production shapes (`src/fft.rs`, `src/fft_programs.rs`
+and the executors in `src/gf/fft_neon.rs` / `src/gf/fft_x86.rs`) implements
+the transform from S.-J. Lin, T. Y. Al-Naffouri, Y. S. Han, W.-H. Chung,
+"Novel Polynomial Basis With Fast Fourier Transform and Its Application to
+Reed-Solomon Erasure Codes" (IEEE Trans. Information Theory, 2016). The
+formulation of encoding as interpolation plus coset evaluation follows the
+paper; the interpolation recursion here was derived independently of, but is
+functionally equivalent to, the principal pivot transform approach used by
+firedancer's `fd_reedsol` (Apache-2.0).

@@ -6,7 +6,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-command -v cc >/dev/null || { echo "installing build tools"; sudo apt-get update -y && sudo apt-get install -y build-essential clang git; }
+command -v cc >/dev/null || { echo "installing build tools"; sudo apt-get update -y && sudo apt-get install -y build-essential clang; }
+command -v git >/dev/null || { echo "installing git"; sudo apt-get update -y && sudo apt-get install -y git; }
 command -v cargo >/dev/null || { curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; source "$HOME/.cargo/env"; }
 source "$HOME/.cargo/env" 2>/dev/null || true
 

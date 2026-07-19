@@ -11,6 +11,9 @@
 //! rs.encode(&mut slices).unwrap();
 //! ```
 
+// The FFT executor macros expand one recursive arm per program op.
+#![recursion_limit = "512"]
+
 // The scalar pin overrides every SIMD kernel, so combining it with another
 // backend feature can only mean a build mistake.
 #[cfg(all(
@@ -38,6 +41,17 @@ compile_error!("enable at most one x86 backend feature (ssse3, avx2, avx512, gfn
 pub mod galois;
 pub mod gf;
 mod errors;
+// The program builder runs in tests, in the dump_programs generator, and at
+// codec construction for runtime shapes wherever a staged executor exists.
+// `fft_enabled` is emitted by build.rs for the FFT-executor configs.
+#[cfg(any(test, fft_enabled))]
+mod fft;
+// The generated programs and their expander only exist where an executor
+// consumes them.
+#[cfg(fft_enabled)]
+mod fft_programs;
+#[cfg(fft_enabled)]
+mod macros;
 mod matrix;
 mod reedsolomon;
 

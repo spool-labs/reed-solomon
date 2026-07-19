@@ -1,4 +1,4 @@
-//! GF(2^8) slice-multiply dispatch — routes field arithmetic to the best
+//! GF(2^8) slice-multiply dispatch: routes field arithmetic to the best
 //! available SIMD kernel for the target architecture at runtime.
 
 pub mod scalar;
@@ -17,6 +17,31 @@ pub mod neon;
 
 #[cfg(target_arch = "aarch64")]
 pub mod neon_fused;
+
+// Compiled FFT encode executors for the production shapes; compiled exactly
+// where ReedSolomon::encode can route to them.
+#[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
+pub(crate) mod fft_neon;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")))]
+pub(crate) mod fft_wasm;
+#[cfg(all(
+    target_arch = "x86_64",
+    not(any(feature = "scalar", feature = "ssse3", feature = "avx2", feature = "avx512"))
+))]
+pub(crate) mod fft_x86;
+
+// The FFT executor for this build, aliased so encode/encode_route name one
+// backend instead of branching per arch. Exactly one alias exists wherever
+// build.rs emits `fft_enabled`.
+#[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
+pub(crate) use fft_neon as fft_active;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")))]
+pub(crate) use fft_wasm as fft_active;
+#[cfg(all(
+    target_arch = "x86_64",
+    not(any(feature = "scalar", feature = "ssse3", feature = "avx2", feature = "avx512"))
+))]
+pub(crate) use fft_x86 as fft_active;
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86;

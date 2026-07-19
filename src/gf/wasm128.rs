@@ -7,9 +7,6 @@ use crate::galois::MUL_TABLE;
 
 use super::scalar;
 
-/// Upper bound on data + parity shards, so input pointers fit a stack array.
-const MAX_SHARDS: usize = 256;
-
 /// Build the low/high 16-byte swizzle tables for coefficient `c`
 #[inline]
 fn tables(c: u8) -> ([u8; 16], [u8; 16]) {
@@ -218,10 +215,6 @@ unsafe fn tiled_k<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     let len = if k > 0 { input[0].as_ref().len() } else { 0 };
     let mask = u8x16_splat(0x0f);
     let tp = tables.as_ptr();
-    let mut in_ptr = [core::ptr::null::<u8>(); MAX_SHARDS];
-    for i in 0..k {
-        in_ptr[i] = input[i].as_ref().as_ptr();
-    }
     let out_ptr: [*mut u8; NOUT] = core::array::from_fn(|j| out[j].as_mut().as_mut_ptr());
 
     let mut pos = 0usize;
@@ -229,7 +222,7 @@ unsafe fn tiled_k<const NOUT: usize, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
         let p = if pos + W <= len { pos } else { len - W };
         let mut accs = [u8x16_splat(0); NOUT];
         for i in 0..k {
-            let v = v128_load((*in_ptr.get_unchecked(i)).add(p) as *const v128);
+            let v = v128_load(input.get_unchecked(i).as_ref().as_ptr().add(p) as *const v128);
             let lo_idx = v128_and(v, mask);
             let hi_idx = u8x16_shr(v, 4);
             for j in 0..NOUT {
