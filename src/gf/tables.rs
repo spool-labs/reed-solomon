@@ -26,6 +26,55 @@ use super::x86_fused;
 ))]
 use super::{mul_slice, mul_slice_xor};
 
+/// Per-coefficient lo and hi nibble tables, 16 bytes each, built at compile
+/// time. Shared by every executor that indexes coefficients by nibble: the
+/// GF(2^8) FFT cores and the GF((2^8)^2) tower core.
+#[cfg(any(
+    all(target_arch = "aarch64", not(feature = "scalar")),
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+))]
+pub(crate) static NIBBLE_PAIRS: [[u8; 32]; 256] = gen_nibble_pairs();
+
+#[cfg(any(
+    all(target_arch = "aarch64", not(feature = "scalar")),
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+))]
+const fn gen_nibble_pairs() -> [[u8; 32]; 256] {
+    let mul = crate::galois::gen_mul_table();
+    let mut pairs = [[0u8; 32]; 256];
+    let mut c = 0usize;
+    while c < 256 {
+        let mut x = 0usize;
+        while x < 16 {
+            pairs[c][x] = mul[c][x];
+            pairs[c][16 + x] = mul[c][x << 4];
+            x += 1;
+        }
+        c += 1;
+    }
+    pairs
+}
+
+/// The 32-byte nibble-pair table for one GF(2^8) coefficient: the 16 low-nibble
+/// products then the 16 high-nibble products.
+///
+/// This layout is the contract between every table builder and the NEON, wasm,
+/// and tower kernels that index it, so it lives in one place. Hoisting the
+/// `MUL_TABLE` row also turns 32 double-indexed lookups into one row lookup.
+#[cfg(any(
+    all(target_arch = "aarch64", not(feature = "scalar")),
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+))]
+pub(crate) fn nibble_pair(coefficient: u8) -> [u8; 32] {
+    let product_row = &MUL_TABLE[coefficient as usize];
+    let mut pair = [0u8; 32];
+    pair[..16].copy_from_slice(&product_row[..16]);
+    for x in 0..16 {
+        pair[16 + x] = product_row[x << 4];
+    }
+    pair
+}
+
 /// Coefficient rows plus the prepared kernel tables needed to apply them
 #[derive(Clone, Debug)]
 pub struct RowTables {
@@ -74,11 +123,7 @@ impl RowTables {
             let mut tables = Vec::with_capacity(rows.len() * input_count * 32);
             for row in &rows {
                 for &coefficient in row {
-                    let product_row = &MUL_TABLE[coefficient as usize];
-                    tables.extend_from_slice(&product_row[..16]);
-                    for x in 0..16 {
-                        tables.push(product_row[x << 4]);
-                    }
+                    tables.extend_from_slice(&nibble_pair(coefficient));
                 }
             }
             tables

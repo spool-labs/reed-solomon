@@ -39,8 +39,15 @@ compile_error!("feature \"scalar\" cannot be combined with another backend featu
 compile_error!("enable at most one x86 backend feature (ssse3, avx2, avx512, gfni)");
 
 pub mod galois;
+// GF((2^8)^2) tower field arithmetic: the scalar reference the tower kernels
+// are differentially tested against, and the matrix layer's element type.
+// Crate-private because `const_matrix` is a kernel-lowering detail, matching
+// how the GF(2^8) affine tables are scoped.
+pub(crate) mod galois16;
 pub mod gf;
 mod errors;
+// The coefficient-field abstraction shared by the generic matrix layer.
+mod field;
 // The program builder runs in tests, in the dump_programs generator, and at
 // codec construction for runtime shapes wherever a staged executor exists.
 // `fft_enabled` is emitted by build.rs for the FFT-executor configs.
@@ -54,6 +61,10 @@ mod fft_programs;
 mod macros;
 mod matrix;
 mod reedsolomon;
+// GF((2^8)^2) additive FFT encode for the wide coder, routed by shape.
+mod fft16;
+mod reedsolomon16;
 
 pub use crate::errors::Error;
 pub use crate::reedsolomon::{PreparedDecoder, ReconstructShard, ReedSolomon};
+pub use crate::reedsolomon16::{PreparedDecoder16, ReedSolomon16};

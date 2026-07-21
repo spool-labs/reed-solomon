@@ -18,6 +18,18 @@ pub mod neon;
 #[cfg(target_arch = "aarch64")]
 pub mod neon_fused;
 
+// Fused Karatsuba kernel for the GF((2^8)^2) tower coder (three GF(2^8)
+// products per coefficient instead of the dense four).
+#[cfg(gf16_neon_enabled)]
+pub mod tower_neon;
+
+// Staged-program executors for the GF((2^8)^2) FFT encode: op-major arena
+// streaming, one per architecture.
+#[cfg(gf16_neon_enabled)]
+pub(crate) mod fft16_neon;
+#[cfg(gf16_x86_enabled)]
+pub(crate) mod fft16_x86;
+
 // Compiled FFT encode executors for the production shapes; compiled exactly
 // where ReedSolomon::encode can route to them.
 #[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
