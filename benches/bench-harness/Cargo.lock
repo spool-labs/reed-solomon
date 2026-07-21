@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "tape-reed-solomon"
-version = "0.1.0"
+version = "0.2.1"
 
 [[package]]
 name = "tape-rs-bench-harness"

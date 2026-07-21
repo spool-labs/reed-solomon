@@ -4,8 +4,16 @@
 [![Documentation](https://docs.rs/tape-reed-solomon/badge.svg)](https://docs.rs/tape-reed-solomon)
 [![License](https://img.shields.io/crates/l/tape-reed-solomon.svg)](LICENSE)
 
-Pure-Rust Reed-Solomon erasure coding over **GF(2^8)** (primitive polynomial
-`0x11d`), with SIMD-accelerated field arithmetic.
+Pure-Rust Reed-Solomon erasure coding with SIMD-accelerated field arithmetic,
+over two fields:
+
+- **GF(2^8)** (primitive polynomial `0x11d`) via `ReedSolomon`, for the usual
+  shapes up to 256 total shards.
+- **GF((2^8)^2)** via `ReedSolomon16`, a tower field built on the same byte
+  arithmetic, for outer distribution shapes that need more than 256 shards.
+
+Both coders are systematic: the data shards are left untouched and the parity
+shards follow them.
 
 ## Performance
 
@@ -18,7 +26,16 @@ tape leads at every shape and size, converging toward parity only at 1 MB where 
 DRAM-bound. Full tables (NEON, wasm, reconstruct, and the run-by-run history) are in
 [`BENCH-RESULTS.md`](BENCH-RESULTS.md).
 
-## API
+## Choosing a coder
+
+Use `ReedSolomon` unless you need more than 256 total shards. GF(2^8) has the
+faster kernels, a byte-per-element wire, and no length constraint on shards.
+
+Reach for `ReedSolomon16` when the shape genuinely exceeds 256 shards. Elements
+are two bytes instead of one, so it moves twice the data per element and costs
+roughly three GF(2^8) multiplies per coefficient instead of one.
+
+## GF(2^8): `ReedSolomon`
 
 ```rust
 let rs = ReedSolomon::new(data_shards, parity_shards)?;
@@ -39,6 +56,47 @@ prepared entry points:
 `reconstruct` also caches decode plans per erasure pattern internally, so
 repeated calls with the same pattern skip the matrix inversion either way.
 Encode, verify, and every reconstruct path run through the fused kernels.
+
+## GF(2^16): `ReedSolomon16`
+
+```rust
+let rs = ReedSolomon16::new(data_shards, parity_shards)?;
+rs.encode(&mut shards)?;
+rs.reconstruct(&mut shards)?;
+```
+
+Up to 65536 total shards. The API mirrors `ReedSolomon`: `encode`, `encode_sep`,
+`verify`, `reconstruct`, `reconstruct_data`, `reconstruct_rows`, and
+`prepare_decode` returning a `PreparedDecoder16`.
+
+### Wire format
+
+A shard is a byte buffer of even length `2N` holding `N` field elements in
+split-plane layout, the `N` low bytes first and then the `N` high bytes:
+
+```text
+shard = [ low_0 low_1 ... low_{N-1} | high_0 high_1 ... high_{N-1} ]
+```
+
+Element `s` takes its high byte from `shard[N + s]` and its low byte from
+`shard[s]`. Splitting the planes is what lets the byte kernels run unmodified
+over each half; an odd shard length cannot be a whole number of elements and is
+rejected.
+
+### Kernels
+
+Multiplying a variable `(high, low)` pair by a fixed coefficient is a 2x2 matrix
+of GF(2^8) constant multiplies, so an `m x k` tower generator applied over split
+planes is exactly a `2m x 2k` GF(2^8) matrix product. On most targets that is
+what runs: the generator is expanded once at construction and handed to the
+existing fused byte kernels, so no tower-specific SIMD is needed.
+
+On aarch64 a dedicated kernel takes the Karatsuba form instead, three GF(2^8)
+products per coefficient rather than the dense four.
+
+Encode also routes through a compiled additive FFT program for shapes up to 1024
+data shards where the multiply count says it wins, the same idea as the GF(2^8)
+FFT path. Reconstruct always stays on the matrix plans.
 
 ## Backends
 
@@ -63,12 +121,17 @@ and evaluate at points k..n-1, exactly the code the matrix construction
 defines, so parity never depends on the route; `ReedSolomon::encode_route`
 reports the choice for a given shard length.
 
-| arch    | backend                                   | kernel              |
-|---------|-------------------------------------------|---------------------|
-| x86_64  | GFNI > AVX-512BW > AVX2 > SSSE3 > scalar   | `src/gf/x86.rs`     |
-| aarch64 | NEON (sha3 fold when available)           | `src/gf/neon.rs`    |
-| wasm32  | simd128 (under `+simd128`)                | `src/gf/wasm128.rs` |
-| other   | scalar                                    | `src/gf/scalar.rs`  |
+| arch    | backend                                   | kernel                  |
+|---------|-------------------------------------------|-------------------------|
+| x86_64  | GFNI > AVX-512BW > AVX2 > SSSE3 > scalar   | `src/gf/x86.rs`         |
+| aarch64 | NEON (sha3 fold when available)           | `src/gf/neon.rs`        |
+| wasm32  | simd128 (under `+simd128`)                | `src/gf/wasm128.rs`     |
+| other   | scalar                                    | `src/gf/scalar.rs`      |
+
+The GF(2^16) coder adds one kernel of its own, the fused Karatsuba tower kernel
+at `src/gf/tower_neon.rs` on aarch64, plus staged FFT executors at
+`src/gf/fft16_neon.rs` and `src/gf/fft16_x86.rs`. Every other target reuses the
+byte kernels above through the expanded generator.
 
 ## Cargo features
 
@@ -111,6 +174,11 @@ cross-implementation reconstruct, round-trip, and the prepared-decoder and
 contiguous-rows paths against reference-encoded stripes. On x86 hosts
 `cargo test` exercises whichever of GFNI/AVX-512/AVX2/SSSE3 the CPU supports;
 on aarch64, NEON.
+
+The GF(2^16) coder is pinned the same way: the FFT and fused-kernel routes are
+checked byte-identical against a symbol-wise scalar oracle built straight from
+the matrix construction, across shapes and shard lengths including sub-plane and
+strip-boundary sizes.
 
 Benchmarks and cross-implementation harnesses live under `benches/`.
 
