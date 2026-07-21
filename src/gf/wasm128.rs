@@ -85,8 +85,8 @@ pub fn mul_slice_xor(out: &mut [u8], input: &[u8], coeff: u8) {
     }
 }
 
-/// Compute all parity shards from the data shards in one fused pass, with a
-/// scalar fallback for sub-block shards
+/// Compute all parity shards from the data shards in one fused pass; shards
+/// shorter than one vector block are padded into one
 pub fn encode_fused<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     tables: &[u8],
     gen_rows: &[Rows],
@@ -132,18 +132,59 @@ pub fn encode_fused<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
         }
         return;
     }
-    // Too short for a vector block. The scalar kernel's table row lookup beats
-    // building per-coefficient nibble tables at these lengths.
-    for (o, out) in parity.iter_mut().enumerate() {
-        let out = out.as_mut();
-        for (i, shard) in data.iter().enumerate() {
-            let c = gen_rows[o].as_ref()[i];
-            if i == 0 {
-                scalar::mul_slice(out, shard.as_ref(), c);
-            } else {
-                scalar::mul_slice_xor(out, shard.as_ref(), c);
+    encode_short(tables, gen_rows, data, parity, len);
+}
+
+/// Encode shards shorter than one vector block by padding into one
+///
+/// The per-coefficient scalar route pays m * k table passes. Parity is a pure
+/// function of the data, so the zero padding only ever produces padding and is
+/// dropped with the tail.
+#[inline(never)]
+fn encode_short<Rows: AsRef<[u8]>, In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    tables: &[u8],
+    gen_rows: &[Rows],
+    data: &[In],
+    parity: &mut [Out],
+    len: usize,
+) {
+    /// One simd128 vector
+    const BLOCK: usize = 16;
+    /// Widest shape the scratch covers, twice the widest generated shape;
+    /// wider ones keep the scalar route
+    const MAX_SHARDS: usize = 64;
+
+    let (k, m) = (data.len(), parity.len());
+    if len == 0 {
+        return;
+    }
+
+    if k > MAX_SHARDS || m > MAX_SHARDS {
+        for (o, out) in parity.iter_mut().enumerate() {
+            let out = out.as_mut();
+            for (i, shard) in data.iter().enumerate() {
+                let c = gen_rows[o].as_ref()[i];
+                if i == 0 {
+                    scalar::mul_slice(out, shard.as_ref(), c);
+                } else {
+                    scalar::mul_slice_xor(out, shard.as_ref(), c);
+                }
             }
         }
+        return;
+    }
+
+    let mut in_buf = [[0u8; BLOCK]; MAX_SHARDS];
+    let mut out_buf = [[0u8; BLOCK]; MAX_SHARDS];
+    for (i, shard) in data.iter().enumerate() {
+        in_buf[i][..len].copy_from_slice(shard.as_ref());
+    }
+
+    // len is BLOCK here, so this cannot re-enter the short path
+    encode_fused(tables, gen_rows, &in_buf[..k], &mut out_buf[..m]);
+
+    for (o, out) in parity.iter_mut().enumerate() {
+        out.as_mut().copy_from_slice(&out_buf[o][..len]);
     }
 }
 
