@@ -141,7 +141,7 @@ pub struct ReedSolomon {
     parity_shard_count: usize,
     total_shard_count: usize,
 
-    matrix: Matrix,
+    matrix: Matrix<u8>,
     parity: RowTables,
 
     #[cfg(fft_enabled)]
@@ -152,8 +152,8 @@ pub struct ReedSolomon {
 
 impl ReedSolomon {
     /// Builds the systematic generator matrix as `vandermonde(total, data) * invert(top block)`
-    fn build_matrix(data_shards: usize, total_shards: usize) -> Result<Matrix, Error> {
-        let vandermonde = Matrix::vandermonde(total_shards, data_shards);
+    fn build_matrix(data_shards: usize, total_shards: usize) -> Result<Matrix<u8>, Error> {
+        let vandermonde = Matrix::<u8>::vandermonde(total_shards, data_shards);
         let top = vandermonde.sub_matrix(0, 0, data_shards, data_shards);
         Ok(vandermonde.multiply(&top.invert()?))
     }
@@ -527,8 +527,8 @@ impl ReedSolomon {
 
     /// Builds the k x k decode matrix from the rows of the generator matrix
     /// that correspond to the shards we still have, then inverts it.
-    fn data_decode_matrix(&self, valid_indices: &[usize]) -> Result<Matrix, Error> {
-        let mut sub_matrix = Matrix::new(self.data_shard_count, self.data_shard_count);
+    fn data_decode_matrix(&self, valid_indices: &[usize]) -> Result<Matrix<u8>, Error> {
+        let mut sub_matrix = Matrix::<u8>::new(self.data_shard_count, self.data_shard_count);
         for (sub_row, &valid_index) in valid_indices.iter().enumerate() {
             for c in 0..self.data_shard_count {
                 sub_matrix.set(sub_row, c, self.matrix.get(valid_index, c));

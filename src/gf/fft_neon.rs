@@ -8,7 +8,6 @@
 
 use core::arch::aarch64::*;
 
-use crate::galois;
 use crate::fft::{FftOp, StagedProgram, StagedStage, MAX_STAGED_REGISTERS};
 use crate::fft_programs::{
     fft_program_10_10, fft_program_14_14, fft_program_16_16, fft_program_18_6,
@@ -19,24 +18,7 @@ use crate::fft_programs::{
 /// Strip width in bytes, one NEON vector
 const STRIP: usize = 16;
 
-/// Per-coefficient lo and hi nibble tables, 16 bytes each, compile time
-static NIBBLE_PAIRS: [[u8; 32]; 256] = gen_nibble_pairs();
-
-const fn gen_nibble_pairs() -> [[u8; 32]; 256] {
-    let mul = galois::gen_mul_table();
-    let mut pairs = [[0u8; 32]; 256];
-    let mut c = 0usize;
-    while c < 256 {
-        let mut x = 0usize;
-        while x < 16 {
-            pairs[c][x] = mul[c][x];
-            pairs[c][16 + x] = mul[c][x << 4];
-            x += 1;
-        }
-        c += 1;
-    }
-    pairs
-}
+use crate::gf::tables::NIBBLE_PAIRS;
 
 /// The engine the expanded programs call into, one method per op form
 struct Engine;
