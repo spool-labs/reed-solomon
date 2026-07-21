@@ -9,6 +9,10 @@
 //! Run here:    cargo run --release
 //! Run on GCP:  ./run.sh     (see README.md)
 
+// additive-fft-reed-solomon is x86-only (its kernels import core::arch::x86_64
+// and enable avx512/gfni unconditionally), so the whole arm is gated off on
+// other hosts and its column reports as absent.
+#[cfg(target_arch = "x86_64")]
 use additive_fft_reed_solomon::{Gf2p8_11d, Rs as Afft};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use reed_solomon_erasure::galois_8::ReedSolomon as Rse;
@@ -26,7 +30,10 @@ const SHAPES: &[(usize, usize)] = &[(7, 13), (10, 10)];
 const EXTRA_SHAPES: &[(usize, usize)] =
     &[(14, 14), (16, 16), (18, 6), (32, 32), (64, 64), (128, 128), (32, 96)];
 // per-plane (100 B–10 KB) through full-row / large (100 KB–4 MiB = sia's sweet spot).
-const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000, 4_194_304];
+// 987 is Agave's erasure shard for the typical chained-merkle 32:32 batch
+// (923 when the last FEC set is resigned), so the (32,32) row lands on the
+// real shred size rather than near it.
+const SIZES: &[usize] = &[100, 987, 1_000, 10_000, 100_000, 1_000_000, 4_194_304];
 
 fn base(k: usize, m: usize, sz: usize, rng: &mut StdRng) -> Vec<Vec<u8>> {
     let mut v: Vec<Vec<u8>> = (0..k)
@@ -113,6 +120,7 @@ fn mib(payload: f64, iters: usize, secs: f64) -> f64 {
 /// additive-fft-reed-solomon at the benched shape, when representable: its
 /// codec is const-generic with power-of-two N and T, so most of our shapes
 /// do not exist for it. Different wire (Cantor basis), so throughput only.
+#[cfg(target_arch = "x86_64")]
 fn afft_encode_mib(k: usize, m: usize, sz: usize, warmup: usize, iters: usize) -> Option<f64> {
     match (k, m) {
         (16, 16) => Some(afft_run::<32, 16>(k, sz, warmup, iters)),
@@ -121,6 +129,13 @@ fn afft_encode_mib(k: usize, m: usize, sz: usize, warmup: usize, iters: usize) -
     }
 }
 
+/// The arm does not exist off x86, so every shape reports absent.
+#[cfg(not(target_arch = "x86_64"))]
+fn afft_encode_mib(_k: usize, _m: usize, _sz: usize, _warmup: usize, _iters: usize) -> Option<f64> {
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
 fn afft_run<const N: usize, const T: usize>(
     k: usize,
     sz: usize,

@@ -17,14 +17,19 @@ reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
 # stripes upstream, so the relevant comparison is single-thread vs single-thread —
 # this isolates sia's 32 KiB cache-blocking from its multi-threading.
 sia_reed_solomon = { version = "0.3", default-features = false, features = ["simd"] }
+rand = "0.8"
+
 # Additive-FFT RS over the same 0x11d field but a Cantor basis: deliberately
 # not wire-compatible with the rse family, so it gets no parity gate, only a
 # throughput column. Its shapes are const-generic powers of two, so only
 # (16,16) and (64,64) among the benched shapes are representable. Its GFNI
-# kernel self-activates under target-cpu=native on AVX-512 GFNI hosts; on
-# other hosts it runs its scalar LUT kernel.
+# kernel self-activates under target-cpu=native on AVX-512 GFNI hosts.
+#
+# x86-only: the kernels import core::arch::x86_64 and enable avx512/gfni
+# unconditionally, so the crate cannot build on aarch64. Target-gated here so
+# the harness still runs on an arm dev host, with the afft column absent.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
 additive-fft-reed-solomon = "0.1.2"
-rand = "0.8"
 
 [profile.release]
 opt-level = 3
