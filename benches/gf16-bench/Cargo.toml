@@ -1,0 +1,24 @@
+# Benchmark-only harness, NOT part of the tape-reed-solomon crate. It path-deps
+# the crate and pulls in reed-solomon-simd, the Leopard-style GF(2^16) coder the
+# production outer path runs today; beating it at the outer shapes is the bar
+# the ReedSolomon16 encode has to clear. Different wire on purpose, so there is
+# no parity gate here, only throughput columns.
+# `[workspace]` makes this a standalone root so it is never absorbed into the crate.
+[package]
+name = "tape-rs-gf16-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tape-reed-solomon = { path = "../.." }
+reed-solomon-simd = "3"
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+# Symbolized profiles from `sample` / Instruments.
+debug = true
+
+[workspace]

@@ -1,0 +1,19 @@
+# Benchmark-only harness, NOT part of the tape-reed-solomon crate. It path-deps
+# the crate and measures how recover cost scales with the number of missing
+# data shards, which is the number that decides whether an FFT/Leopard erasure
+# decoder would ever pay for itself (see AGAVE-RS-PLAN.md section 4, Tier 2).
+# `[workspace]` makes this a standalone root so it is never absorbed into the crate.
+[package]
+name = "tape-rs-recover-curve"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tape-reed-solomon = { path = "../.." }
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[workspace]
