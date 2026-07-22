@@ -22,6 +22,8 @@ pub mod neon_fused;
 // products per coefficient instead of the dense four).
 #[cfg(gf16_neon_enabled)]
 pub mod tower_neon;
+#[cfg(gf16_x86_enabled)]
+pub(crate) mod tower_x86;
 
 // Staged-program executors for the GF((2^8)^2) FFT encode: op-major arena
 // streaming, one per architecture.

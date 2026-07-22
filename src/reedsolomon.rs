@@ -238,13 +238,13 @@ impl ReedSolomon {
     #[doc(hidden)]
     pub fn encode_route(&self, shard_len: usize) -> &'static str {
         #[cfg(fft_enabled)]
-        if gf::fft_active::eligible(shard_len) {
+        {
             let generated = crate::fft_programs::GENERATED_SHAPES
                 .contains(&(self.data_shard_count, self.parity_shard_count));
-            if generated {
+            if generated && gf::fft_active::generated_eligible(shard_len) {
                 return "fft-generated";
             }
-            if self.staged.is_some() {
+            if self.staged.is_some() && gf::fft_active::staged_eligible(shard_len) {
                 return "fft-staged";
             }
         }
@@ -321,19 +321,28 @@ impl ReedSolomon {
         // other profitable shape runs its staged program; both need a
         // fraction of the schoolbook multiplies. Remaining shapes and
         // sub-strip lengths take the fused matrix path. All byte-identical.
+        //
+        // Generated programs run on any AVX2 host (nibble core without GFNI),
+        // so they gate on `generated_eligible`; the staged executor is still
+        // GFNI-only on x86, so it gates on the stricter `staged_eligible`.
         #[cfg(fft_enabled)]
-        if gf::fft_active::eligible(input[0].as_ref().len()) {
-            if gf::fft_active::encode_generated(
-                self.data_shard_count,
-                self.parity_shard_count,
-                input,
-                output,
-            ) {
+        {
+            let len = input[0].as_ref().len();
+            if gf::fft_active::generated_eligible(len)
+                && gf::fft_active::encode_generated(
+                    self.data_shard_count,
+                    self.parity_shard_count,
+                    input,
+                    output,
+                )
+            {
                 return Ok(());
             }
-            if let Some(program) = &self.staged {
-                gf::fft_active::encode_staged(program, input, output);
-                return Ok(());
+            if gf::fft_active::staged_eligible(len) {
+                if let Some(program) = &self.staged {
+                    gf::fft_active::encode_staged(program, input, output);
+                    return Ok(());
+                }
             }
         }
 

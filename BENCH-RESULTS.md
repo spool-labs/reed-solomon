@@ -20,10 +20,11 @@ generator matrix defines, so parity never depends on the route). `encode_route(l
 reports the choice:
 
 - **Generated FFT programs** for the listed `GENERATED_SHAPES` ((7,13), (10,10),
-  (14,14), (16,16), (18,6)), compiled straight-line and register-resident on NEON,
-  GFNI (64-byte zmm strips where AVX-512 is present, else 32-byte ymm), and wasm
-  simd128. A fraction of the schoolbook multiplies (29 vs 91 at (7,13), 34 vs 100
-  at (10,10)). Adding a shape is one generator line plus its per-backend registration.
+  (14,14), (16,16), (18,6), (32,32)), compiled straight-line and register-resident
+  on NEON, GFNI (64-byte zmm strips where AVX-512 is present, else 32-byte ymm), any
+  AVX2 host through the `vpshufb` nibble executor, and wasm simd128. A fraction of
+  the schoolbook multiplies (29 vs 91 at (7,13), 34 vs 100 at (10,10)). Adding a
+  shape is one generator line plus its per-backend registration.
 - **Staged FFT** for any other power-of-two data count, compiled at construction into
   block transforms plus glue over a stack register file.
 - **Fused matrix kernels** for every remaining shape and every sub-strip length,
@@ -316,3 +317,28 @@ byte-clean on Turin. The 100 B collapse was erased (45x at (14,14), 18x at (18,6
 shard reconstruct rode the same tiles ((7,13) worst-case 100 B 296 → 2352, 1 KB
 2701 → 13431). This left the generated-coverage gap as the last x86 lever, closed by
 the five-shape final run (Current state).
+
+### AVX2 FFT for GFNI-less x86 (2026-07-22)
+
+The x86 FFT executors needed GFNI, so a host with AVX2 but no GFNI (much of the
+Intel fleet, older AMD) ran the fused matrix instead of the FFT. Added an AVX2
+`vpshufb` nibble core beside the GFNI affine core, for both the GF(2^8) generated
+programs and the GF(2^16) tower FFT, plus an x86 Karatsuba tower kernel
+(`src/gf/tower_x86.rs`) and GFNI-aware routing (a GFNI-less x86 host now routes
+every fitting shape to the FFT). Validated on an ephemeral GCP node matching the
+fleet CPU (Intel Xeon 2.20GHz, AVX2, no GFNI); differential gates and the
+wire-compat gate pass on real AVX2, aarch64, and Rosetta.
+
+GF(2^8) nibble FFT vs the fused AVX2 matrix on that Xeon, MiB/s (routed column):
+
+| shape   | 4 KB | 64 KB | 1 MB |
+|---------|------|-------|------|
+| (7,13)  | 2.17x | 2.13x | 1.35x |
+| (16,16) | 3.88x | 3.57x | 2.16x |
+| (32,32) | 5.17x | 5.48x | 6.01x |
+
+So `ReedSolomon::encode` at Clay's (7,13) went ~2078 → ~4943 MiB/s at 4 KB on the
+no-GFNI path. GF(2^16) strip-mining (cache-blocked column strips, `STRIP_BYTES`)
+landed the same window: it flattens encode across shard sizes and lifts decode
+(M4: +23% at 4 MiB, +64% at 64 MiB). NEON and GFNI hosts are unchanged; this
+lifts only the AVX2-without-GFNI tier.

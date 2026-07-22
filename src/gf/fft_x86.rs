@@ -101,6 +101,51 @@ impl ZmmEngine {
     }
 }
 
+/// AVX2 nibble engine for hosts without GFNI: the same programs, multiplying
+/// through two vpshufb against the compile-time NIBBLE_PAIRS tables instead of
+/// one gf2p8affineqb against the AFFINE table. Two lookups where GFNI needs one,
+/// but it needs only AVX2, so the FFT reaches the GFNI-less x86 fleet that
+/// otherwise falls to the fused matrix path.
+struct NibbleEngine;
+
+impl NibbleEngine {
+    #[inline(always)]
+    unsafe fn load(ptr: *const u8, off: usize) -> __m256i {
+        _mm256_loadu_si256(ptr.add(off) as *const __m256i)
+    }
+
+    #[inline(always)]
+    unsafe fn store(ptr: *mut u8, off: usize, value: __m256i) {
+        _mm256_storeu_si256(ptr.add(off) as *mut __m256i, value)
+    }
+
+    #[inline(always)]
+    unsafe fn mul_of(value: __m256i, c: u8) -> __m256i {
+        let t = crate::gf::tables::NIBBLE_PAIRS[c as usize].as_ptr();
+        let lo = _mm256_broadcastsi128_si256(_mm_loadu_si128(t as *const __m128i));
+        let hi = _mm256_broadcastsi128_si256(_mm_loadu_si128(t.add(16) as *const __m128i));
+        let mask = _mm256_set1_epi8(0x0f);
+        let lo_idx = _mm256_and_si256(value, mask);
+        let hi_idx = _mm256_and_si256(_mm256_srli_epi16::<4>(value), mask);
+        _mm256_xor_si256(_mm256_shuffle_epi8(lo, lo_idx), _mm256_shuffle_epi8(hi, hi_idx))
+    }
+
+    #[inline(always)]
+    unsafe fn mul_xor(dst: __m256i, src: __m256i, c: u8) -> __m256i {
+        _mm256_xor_si256(dst, Self::mul_of(src, c))
+    }
+
+    #[inline(always)]
+    unsafe fn xor(dst: __m256i, src: __m256i) -> __m256i {
+        _mm256_xor_si256(dst, src)
+    }
+
+    #[inline(always)]
+    unsafe fn zero() -> __m256i {
+        _mm256_setzero_si256()
+    }
+}
+
 macro_rules! fft_strip_loop {
     ($program:ident, $engine:ty, $strip:expr, $data:ident, $parity:ident, $regs:ident, $k:literal, $m:literal) => {{
         let len = $data[0].as_ref().len();
@@ -122,13 +167,14 @@ macro_rules! fft_strip_loop {
 }
 
 macro_rules! fft_executor {
-    ($name:ident, $core:ident, $core_zmm:ident, $program:ident, $regs:ident, $k:literal, $m:literal) => {
-        /// Encode one production shape through its compiled program
+    ($name:ident, $core:ident, $core_zmm:ident, $core_nibble:ident, $program:ident, $regs:ident, $k:literal, $m:literal) => {
+        /// Encode one production shape through its compiled program.
         ///
-        /// Caller guarantees gfni and avx2 are available, the shard counts
-        /// match the shape, and all shards share one length of at least the
-        /// strip width. Hosts with AVX-512 GFNI and room for a 64-byte strip
-        /// run the zmm core.
+        /// Caller guarantees AVX2 is available (via `generated_eligible`), the
+        /// shard counts match the shape, and all shards share one length of at
+        /// least the strip width. GFNI hosts run the affine cores (zmm where
+        /// AVX-512 and a 64-byte strip fit); GFNI-less hosts run the AVX2
+        /// nibble core.
         pub(crate) fn $name<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
             data: &[In],
             parity: &mut [Out],
@@ -136,15 +182,19 @@ macro_rules! fft_executor {
             debug_assert_eq!(data.len(), $k);
             debug_assert_eq!(parity.len(), $m);
             debug_assert!(data[0].as_ref().len() >= STRIP);
-            // SAFETY: the caller checked gfni and avx2 (pinned or detected),
-            // the zmm core additionally checks avx512f; counts and lengths
+            // SAFETY: caller checked AVX2; the affine cores additionally need
+            // GFNI (checked here) and the zmm core AVX-512; counts and lengths
             // are the caller's contract, checked in debug builds.
-            if data[0].as_ref().len() >= ZMM_STRIP
-                && (cfg!(feature = "gfni") || is_x86_feature_detected!("avx512f"))
-            {
-                unsafe { $core_zmm(data, parity) }
+            if cfg!(feature = "gfni") || is_x86_feature_detected!("gfni") {
+                if data[0].as_ref().len() >= ZMM_STRIP
+                    && (cfg!(feature = "gfni") || is_x86_feature_detected!("avx512f"))
+                {
+                    unsafe { $core_zmm(data, parity) }
+                } else {
+                    unsafe { $core(data, parity) }
+                }
             } else {
-                unsafe { $core(data, parity) }
+                unsafe { $core_nibble(data, parity) }
             }
         }
 
@@ -160,19 +210,40 @@ macro_rules! fft_executor {
         ) {
             fft_strip_loop!($program, ZmmEngine, ZMM_STRIP, data, parity, $regs, $k, $m)
         }
+
+        /// Same program on the AVX2 nibble engine, for GFNI-less hosts.
+        ///
+        /// # Safety
+        /// avx2 available; counts match the shape; shards share one length
+        /// `>= STRIP`.
+        #[target_feature(enable = "avx2")]
+        pub(crate) unsafe fn $core_nibble<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+            data: &[In],
+            parity: &mut [Out],
+        ) {
+            fft_strip_loop!($program, NibbleEngine, STRIP, data, parity, $regs, $k, $m)
+        }
     };
 }
 
-fft_executor!(encode_7_13, core_7_13, core_zmm_7_13, fft_program_7_13, FFT_REGS_7_13, 7, 13);
-fft_executor!(encode_10_10, core_10_10, core_zmm_10_10, fft_program_10_10, FFT_REGS_10_10, 10, 10);
-fft_executor!(encode_14_14, core_14_14, core_zmm_14_14, fft_program_14_14, FFT_REGS_14_14, 14, 14);
-fft_executor!(encode_16_16, core_16_16, core_zmm_16_16, fft_program_16_16, FFT_REGS_16_16, 16, 16);
-fft_executor!(encode_18_6, core_18_6, core_zmm_18_6, fft_program_18_6, FFT_REGS_18_6, 18, 6);
-fft_executor!(encode_32_32, core_32_32, core_zmm_32_32, fft_program_32_32, FFT_REGS_32_32, 32, 32);
-/// Shard length and host that can ride the FFT path: GFNI plus AVX2 present
-/// (pinned or detected) and at least one full strip
+fft_executor!(encode_7_13, core_7_13, core_zmm_7_13, core_nib_7_13, fft_program_7_13, FFT_REGS_7_13, 7, 13);
+fft_executor!(encode_10_10, core_10_10, core_zmm_10_10, core_nib_10_10, fft_program_10_10, FFT_REGS_10_10, 10, 10);
+fft_executor!(encode_14_14, core_14_14, core_zmm_14_14, core_nib_14_14, fft_program_14_14, FFT_REGS_14_14, 14, 14);
+fft_executor!(encode_16_16, core_16_16, core_zmm_16_16, core_nib_16_16, fft_program_16_16, FFT_REGS_16_16, 16, 16);
+fft_executor!(encode_18_6, core_18_6, core_zmm_18_6, core_nib_18_6, fft_program_18_6, FFT_REGS_18_6, 18, 6);
+fft_executor!(encode_32_32, core_32_32, core_zmm_32_32, core_nib_32_32, fft_program_32_32, FFT_REGS_32_32, 32, 32);
+/// The generated executors run on any AVX2 host: GFNI affine cores where GFNI
+/// is present, the nibble core otherwise. So the generated FFT is available
+/// wherever AVX2 is, which is the whole point of the nibble core.
 #[inline]
-pub(crate) fn eligible(len: usize) -> bool {
+pub(crate) fn generated_eligible(len: usize) -> bool {
+    (cfg!(feature = "gfni") || is_x86_feature_detected!("avx2")) && len >= STRIP
+}
+
+/// The staged (non-generated, power-of-two) executor is GFNI-only, so its gate
+/// still requires GFNI. Non-generated shapes on a GFNI-less host fall to the
+/// fused matrix path.
+pub(crate) fn staged_eligible(len: usize) -> bool {
     let has_gfni = cfg!(feature = "gfni")
         || (is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2"));
     has_gfni && len >= STRIP
@@ -195,6 +266,33 @@ pub(crate) fn encode_generated<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
         (16, 16) => encode_16_16(data, parity),
         (18, 6) => encode_18_6(data, parity),
         (32, 32) => encode_32_32(data, parity),
+        _ => return false,
+    }
+    true
+}
+
+/// Force a generated shape onto the AVX2 nibble engine regardless of GFNI, so a
+/// GFNI host can still validate and measure the GFNI-less path. Production
+/// reaches the nibble core through the runtime check in each generated encoder,
+/// so this forced entry is test-only. Returns false for a shape with no program.
+///
+/// # Safety
+/// avx2 available; shard counts match the shape; shards share one length
+/// `>= STRIP`.
+#[cfg(test)]
+pub(crate) unsafe fn encode_generated_nibble<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    k: usize,
+    m: usize,
+    data: &[In],
+    parity: &mut [Out],
+) -> bool {
+    match (k, m) {
+        (7, 13) => core_nib_7_13(data, parity),
+        (10, 10) => core_nib_10_10(data, parity),
+        (14, 14) => core_nib_14_14(data, parity),
+        (16, 16) => core_nib_16_16(data, parity),
+        (18, 6) => core_nib_18_6(data, parity),
+        (32, 32) => core_nib_32_32(data, parity),
         _ => return false,
     }
     true
@@ -432,6 +530,40 @@ mod tests {
                     } else {
                         encode_10_10(&ins, &mut outs);
                     }
+                }
+                assert_eq!(got, want, "k={k} m={m} len={len}");
+            }
+        }
+    }
+
+    // The AVX2 nibble engine matches the scalar matrix encode on every
+    // generated shape and strip phase; a no-op without AVX2 (so inert under
+    // Rosetta). This is the correctness gate for the GFNI-less FFT path.
+    #[test]
+    fn nibble_matches_scalar() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for &(k, m) in &[(7usize, 13usize), (10, 10), (14, 14), (16, 16), (18, 6), (32, 32)] {
+            let rs = crate::ReedSolomon::new(k, m).expect("codec should build");
+            for &len in &[32usize, 33, 63, 64, 65, 100, 1000, 4096] {
+                let data: Vec<Vec<u8>> = (0..k)
+                    .map(|s| (0..len).map(|i| ((i * 31 + s * 17) as u8) ^ 0x5a).collect())
+                    .collect();
+
+                let mut shards = data.clone();
+                shards.extend((0..m).map(|_| vec![0u8; len]));
+                rs.encode_scalar(&mut shards).expect("scalar encode should succeed");
+                let want = &shards[k..];
+
+                let ins: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
+                let mut got = vec![vec![0u8; len]; m];
+                {
+                    let mut outs: Vec<&mut [u8]> =
+                        got.iter_mut().map(|v| v.as_mut_slice()).collect();
+                    // SAFETY: avx2 checked above; counts match; len >= STRIP.
+                    let ran = unsafe { encode_generated_nibble(k, m, &ins, &mut outs) };
+                    assert!(ran, "no generated program for ({k},{m})");
                 }
                 assert_eq!(got, want, "k={k} m={m} len={len}");
             }

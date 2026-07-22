@@ -176,7 +176,13 @@ fft_executor!(encode_18_6, core_18_6, core_18_6_sha3, fft_program_18_6, FFT_REGS
 fft_executor!(encode_32_32, core_32_32, core_32_32_sha3, fft_program_32_32, FFT_REGS_32_32, 32, 32);
 /// Shard length that can ride the FFT path: at least one full strip
 #[inline]
-pub(crate) fn eligible(len: usize) -> bool {
+/// NEON has one SIMD tier, so both the generated and staged executors are
+/// available on the same condition: a full strip fits.
+pub(crate) fn generated_eligible(len: usize) -> bool {
+    len >= STRIP
+}
+
+pub(crate) fn staged_eligible(len: usize) -> bool {
     len >= STRIP
 }
 
