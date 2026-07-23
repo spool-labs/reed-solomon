@@ -21,12 +21,15 @@ use crate::errors::Error;
 use crate::galois16;
 use crate::matrix::Matrix;
 
-// aarch64 (no pinned scalar) runs the fused Karatsuba tower kernel; every other
-// target runs the dense 2m x 2k expansion through the shared GF(2^8) kernels.
-#[cfg(gf16_neon_enabled)]
+// aarch64 and x86_64 (no pinned scalar) run the fused Karatsuba tower kernel;
+// any other target, and an x86 host without SSSE3, runs the dense 2m x 2k
+// expansion through the shared GF(2^8) kernels.
+#[cfg(gf16_simd_enabled)]
 use crate::gf::tables::nibble_pair;
 #[cfg(gf16_neon_enabled)]
 use crate::gf::tower_neon;
+#[cfg(gf16_x86_enabled)]
+use crate::gf::tower_x86;
 #[cfg(not(gf16_neon_enabled))]
 use crate::gf::tables::RowTables;
 
@@ -47,7 +50,7 @@ pub(crate) struct RowTables16 {
     data_count: usize,
     rows: Vec<Vec<u16>>,
 
-    #[cfg(gf16_neon_enabled)]
+    #[cfg(gf16_simd_enabled)]
     kara: KaraTables,
     // Expanded generator over planes, ordered [all low planes, all high planes]
     // on both input and output sides.
@@ -58,7 +61,7 @@ pub(crate) struct RowTables16 {
 /// Per-constant nibble tables for the three Karatsuba products `c_lo`,
 /// `c_hi + c_lo`, and `c_hi * L`, each `m*k*32` bytes at index `(j*k+i)*32`
 /// (16-byte low table then 16-byte high table).
-#[cfg(gf16_neon_enabled)]
+#[cfg(gf16_simd_enabled)]
 #[derive(Clone, Debug)]
 struct KaraTables {
     c0: Vec<u8>,
@@ -66,7 +69,7 @@ struct KaraTables {
     c2: Vec<u8>,
 }
 
-#[cfg(gf16_neon_enabled)]
+#[cfg(gf16_simd_enabled)]
 impl KaraTables {
     fn new(rows: &[Vec<u16>], data_count: usize) -> KaraTables {
         let output_count = rows.len();
@@ -93,7 +96,7 @@ impl KaraTables {
 impl RowTables16 {
     /// Build the kernel tables from `m x k` tower coefficient rows.
     pub(crate) fn new(rows: Vec<Vec<u16>>, data_count: usize) -> RowTables16 {
-        #[cfg(gf16_neon_enabled)]
+        #[cfg(gf16_simd_enabled)]
         let kara = KaraTables::new(&rows, data_count);
 
         #[cfg(not(gf16_neon_enabled))]
@@ -122,7 +125,7 @@ impl RowTables16 {
         RowTables16 {
             data_count,
             rows,
-            #[cfg(gf16_neon_enabled)]
+            #[cfg(gf16_simd_enabled)]
             kara,
             #[cfg(not(gf16_neon_enabled))]
             expanded,
@@ -166,11 +169,30 @@ impl RowTables16 {
 
     /// Apply the generator to plane slices already in `[low planes, high planes]`
     /// order on both sides (whole shards, or symbol sub-ranges from verify).
-    /// Routes to the fused Karatsuba kernel on aarch64, the dense expansion
-    /// elsewhere, without reshuffling the planes.
+    /// Routes to the fused Karatsuba kernel wherever one exists, otherwise the
+    /// dense expansion, without reshuffling the planes.
     pub(crate) fn apply_planes(&self, plane_inputs: &[&[u8]], plane_outputs: &mut [&mut [u8]]) {
         debug_assert_eq!(plane_inputs.len(), 2 * self.data_count);
         debug_assert_eq!(plane_outputs.len(), 2 * self.rows.len());
+
+        // Karatsuba needs SSSE3 at minimum, so unlike aarch64 the x86 arm can
+        // still land on a host without it and falls back to the expansion.
+        #[cfg(gf16_x86_enabled)]
+        if tower_x86::available() {
+            let (low_inputs, high_inputs) = plane_inputs.split_at(self.data_count);
+            let (low_outputs, high_outputs) = plane_outputs.split_at_mut(self.rows.len());
+            tower_x86::encode(
+                &self.kara.c0,
+                &self.kara.c1,
+                &self.kara.c2,
+                &self.rows,
+                low_inputs,
+                high_inputs,
+                low_outputs,
+                high_outputs,
+            );
+            return;
+        }
 
         #[cfg(gf16_neon_enabled)]
         {
@@ -327,6 +349,43 @@ impl ReedSolomon16 {
     /// the matrix kernels, otherwise the fused matrix path. Byte-identical
     /// either way.
     fn encode_into<In: AsRef<[u8]>, Out: AsMut<[u8]>>(&self, input: &[In], output: &mut [Out]) {
+        // The FFT executor already cache-blocks internally over one arena it
+        // allocates per call, so outer column strips would just re-allocate and
+        // re-zero that arena once per strip (256 times over a 4 MiB shard).
+        // Hand it the whole shard and let it strip itself. Only the matrix
+        // kernels, which stream the full width in one pass, need the outer
+        // strips to stay cache-resident.
+        if self.staged.is_some() {
+            self.encode_block(input, output);
+            return;
+        }
+
+        // `new` rejects zero data shards, so there is always a row to size from.
+        let shard_len = input[0].as_ref().len();
+        if shard_len <= STRIP_BYTES {
+            self.encode_block(input, output);
+            return;
+        }
+
+        let mut offset = 0;
+        while offset < shard_len {
+            // Strip width stays even because the stride and the shard length
+            // both are, so every strip is a whole number of symbols.
+            let width = STRIP_BYTES.min(shard_len - offset);
+            let strip_in: Vec<&[u8]> = input
+                .iter()
+                .map(|s| &s.as_ref()[offset..offset + width])
+                .collect();
+            let mut strip_out: Vec<&mut [u8]> = output
+                .iter_mut()
+                .map(|s| &mut s.as_mut()[offset..offset + width])
+                .collect();
+            self.encode_block(&strip_in, &mut strip_out);
+            offset += width;
+        }
+    }
+
+    fn encode_block<In: AsRef<[u8]>, Out: AsMut<[u8]>>(&self, input: &[In], output: &mut [Out]) {
         if let Some(program) = &self.staged {
             crate::fft16::encode(program, input, output);
         } else {
@@ -734,6 +793,16 @@ fn scan_shards<Shard: ReconstructShard>(
 /// Gather survivors and missing slices, then run the plan's tables: missing data
 /// from the survivors, then missing parity from the completed data. Identical in
 /// shape to the GF(2^8) path; the plane split lives inside `RowTables16::apply`.
+/// Column-strip width for long shards, shared by encode and reconstruct.
+///
+/// RS treats every field-element column independently, so applying the row
+/// tables one byte range at a time is bit-identical to applying them across the
+/// whole shard, but keeps the live working set (`rows * STRIP_BYTES`) in cache
+/// instead of streaming the whole stripe past it. Measured best of 2/4/8/16/32
+/// KiB on M4; it flattens encode throughput across chunk sizes entirely, and
+/// recovers ~40% of decode at the 16 MiB and larger chunks.
+const STRIP_BYTES: usize = 16 << 10;
+
 fn reconstruct_with_plan<Shard: ReconstructShard>(
     data_shard_count: usize,
     plan: &DecodePlan,
@@ -771,26 +840,53 @@ fn reconstruct_with_plan<Shard: ReconstructShard>(
         }
     }
 
-    if !missing_data_slices.is_empty() {
-        plan.data_tables.apply(&sub_shards, &mut missing_data_slices);
-    }
-    if data_only || missing_parity_slices.is_empty() {
+    let need_data = !missing_data_slices.is_empty();
+    let need_parity = !data_only && !missing_parity_slices.is_empty();
+    if !need_data && !need_parity {
         return Ok(());
     }
 
-    let mut all_data: Vec<&[u8]> = Vec::with_capacity(data_shard_count);
-    let mut survivor = 0;
-    let mut recovered = 0;
-    for index in 0..data_shard_count {
-        if recovered < plan.missing_data.len() && plan.missing_data[recovered] == index {
-            all_data.push(&*missing_data_slices[recovered]);
-            recovered += 1;
-        } else {
-            all_data.push(sub_shards[survivor]);
-            survivor += 1;
+    // One column strip at a time, so the rows being read and written stay in
+    // cache. Missing parity is rebuilt from the data rows of the *same* strip,
+    // which includes the ones recovered just above, so both applies live in one
+    // iteration rather than one pass each over the full shard.
+    let mut offset = 0;
+    while offset < shard_len {
+        // Width stays even because the stride and the shard length both are.
+        let width = STRIP_BYTES.min(shard_len - offset);
+        let (lo, hi) = (offset, offset + width);
+
+        if need_data {
+            let strip_in: Vec<&[u8]> = sub_shards.iter().map(|s| &s[lo..hi]).collect();
+            let mut strip_out: Vec<&mut [u8]> = missing_data_slices
+                .iter_mut()
+                .map(|s| &mut s[lo..hi])
+                .collect();
+            plan.data_tables.apply(&strip_in, &mut strip_out);
         }
+
+        if need_parity {
+            let mut all_data: Vec<&[u8]> = Vec::with_capacity(data_shard_count);
+            let mut survivor = 0;
+            let mut recovered = 0;
+            for index in 0..data_shard_count {
+                if recovered < plan.missing_data.len() && plan.missing_data[recovered] == index {
+                    all_data.push(&missing_data_slices[recovered][lo..hi]);
+                    recovered += 1;
+                } else {
+                    all_data.push(&sub_shards[survivor][lo..hi]);
+                    survivor += 1;
+                }
+            }
+            let mut strip_parity: Vec<&mut [u8]> = missing_parity_slices
+                .iter_mut()
+                .map(|s| &mut s[lo..hi])
+                .collect();
+            plan.parity_tables.apply(&all_data, &mut strip_parity);
+        }
+
+        offset += width;
     }
-    plan.parity_tables.apply(&all_data, &mut missing_parity_slices);
     Ok(())
 }
 
@@ -878,6 +974,110 @@ mod tests {
                 rs.encode(&mut shards).unwrap();
                 let want = symbolwise_parity(rs.parity.rows(), &data_shards, len);
                 assert_eq!(&shards[k..], &want[..], "k={k} m={m} len={len}");
+            }
+        }
+    }
+
+    // Shards longer than ENCODE_STRIP_BYTES are encoded one column strip at a
+    // time. Column independence says that must be bit-identical to encoding the
+    // whole shard, and that a prefix encoded on its own matches the same prefix
+    // of a long encode. Sizes straddle the strip boundary so the seam and the
+    // ragged tail are both covered.
+    #[test]
+    fn strip_mined_encode_matches_whole() {
+        const STRIP: usize = STRIP_BYTES;
+        // (11,20) is the live snapshot shape; (3,2) stays on the matrix route.
+        for &(k, m) in &[(3usize, 2usize), (11, 20)] {
+            let rs = ReedSolomon16::new(k, m).unwrap();
+            for &len in &[STRIP, STRIP + 2, 2 * STRIP, 3 * STRIP + 64, 5 * STRIP - 2] {
+                let data: Vec<Vec<u8>> = (0..k)
+                    .map(|i| (0..len).map(|j| (i * 31 + j * 7 + j / 97) as u8).collect())
+                    .collect();
+                let mut parity = vec![vec![0u8; len]; m];
+                rs.encode_sep(&data, &mut parity).unwrap();
+
+                // A one-strip prefix encoded alone must match the long encode's
+                // prefix; this is what fails first if a seam is mishandled.
+                let head: Vec<&[u8]> = data.iter().map(|d| &d[..STRIP]).collect();
+                let mut head_parity = vec![vec![0u8; STRIP]; m];
+                rs.encode_sep(&head, &mut head_parity).unwrap();
+                for (row, want) in head_parity.iter().enumerate() {
+                    assert_eq!(
+                        &parity[row][..STRIP],
+                        &want[..],
+                        "k={k} m={m} len={len} row={row} prefix diverged"
+                    );
+                }
+
+                let mut stripe: Vec<Vec<u8>> = data.clone();
+                stripe.extend(parity.iter().cloned());
+                assert!(rs.verify(&stripe).unwrap(), "k={k} m={m} len={len}");
+
+                // Drop every data shard we can and rebuild from parity.
+                let erase = k.min(m);
+                let mut opt: Vec<Option<Vec<u8>>> = stripe.iter().cloned().map(Some).collect();
+                for slot in opt.iter_mut().take(erase) {
+                    *slot = None;
+                }
+                rs.reconstruct_data(&mut opt).unwrap();
+                for i in 0..erase {
+                    assert_eq!(
+                        opt[i].as_ref().unwrap(),
+                        &data[i],
+                        "k={k} m={m} len={len} shard {i} wrong after rebuild"
+                    );
+                }
+
+                // Mixed loss driving the parity branch: rebuilding a missing
+                // parity row reads the data rows of the same strip, including
+                // one recovered in that very iteration.
+                // Two losses total, which every shape here has the parity to
+                // absorb: one data row and one parity row.
+                let mut opt: Vec<Option<Vec<u8>>> = stripe.iter().cloned().map(Some).collect();
+                opt[0] = None;
+                opt[k] = None;
+                rs.reconstruct(&mut opt).unwrap();
+                for (i, want) in stripe.iter().enumerate() {
+                    assert_eq!(
+                        opt[i].as_ref().unwrap(),
+                        want,
+                        "k={k} m={m} len={len} row {i} wrong after full rebuild"
+                    );
+                }
+            }
+        }
+    }
+
+    // The x86 Karatsuba kernel must be byte-identical to the dense 2m x 2k
+    // expansion it replaces. Both table sets exist on x86, so this compares the
+    // two directly rather than trusting the round-trip. Plane lengths straddle
+    // the 16- and 32-byte vector widths so the ssse3 tile, the avx2 tile, the
+    // backed-up final block, and the short-plane scalar path are all covered.
+    #[cfg(gf16_x86_enabled)]
+    #[test]
+    fn tower_x86_matches_expanded() {
+        for &(k, m) in &[(1usize, 1usize), (3, 2), (7, 13), (11, 20)] {
+            let rows: Vec<Vec<u16>> = (0..m)
+                .map(|j| (0..k).map(|i| ((j * 7919 + i * 104729 + 1) % 65536) as u16).collect())
+                .collect();
+            let tables = RowTables16::new(rows, k);
+            for &plane in &[1usize, 7, 15, 16, 17, 31, 32, 33, 64, 100, 257] {
+                let inputs: Vec<Vec<u8>> = (0..2 * k)
+                    .map(|i| (0..plane).map(|x| (i * 31 + x * 17 + x / 13) as u8).collect())
+                    .collect();
+                let iref: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+
+                let mut got: Vec<Vec<u8>> = vec![vec![0u8; plane]; 2 * m];
+                let mut gref: Vec<&mut [u8]> =
+                    got.iter_mut().map(|v| v.as_mut_slice()).collect();
+                tables.apply_planes(&iref, &mut gref);
+
+                let mut want: Vec<Vec<u8>> = vec![vec![0u8; plane]; 2 * m];
+                let mut wref: Vec<&mut [u8]> =
+                    want.iter_mut().map(|v| v.as_mut_slice()).collect();
+                tables.expanded.apply(&iref, &mut wref);
+
+                assert_eq!(got, want, "k={k} m={m} plane={plane}");
             }
         }
     }

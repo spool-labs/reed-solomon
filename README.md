@@ -91,12 +91,16 @@ planes is exactly a `2m x 2k` GF(2^8) matrix product. On most targets that is
 what runs: the generator is expanded once at construction and handed to the
 existing fused byte kernels, so no tower-specific SIMD is needed.
 
-On aarch64 a dedicated kernel takes the Karatsuba form instead, three GF(2^8)
-products per coefficient rather than the dense four.
+On aarch64 and on x86 a dedicated kernel takes the Karatsuba form instead, three
+GF(2^8) products per coefficient rather than the dense four (`src/gf/tower_neon.rs`
+and `src/gf/tower_x86.rs`).
 
 Encode also routes through a compiled additive FFT program for shapes up to 1024
 data shards where the multiply count says it wins, the same idea as the GF(2^8)
-FFT path. Reconstruct always stays on the matrix plans.
+FFT path. On x86 that FFT runs the GFNI affine executor where the host has GFNI
+and an AVX2 `vpshufb` nibble executor where it does not, so a GFNI-less host runs
+the FFT vectorized rather than falling back to the matrix. Reconstruct always
+stays on the matrix plans.
 
 ## Backends
 
@@ -107,9 +111,10 @@ per-backend differential tests pin them byte-identical to scalar.
 
 Encoding picks between three byte-identical routes per shape. Shapes on the
 generated list (`GENERATED_SHAPES`, currently (7,13), (10,10), (14,14),
-(16,16), and (18,6)) run generated Lin-Chung-Han FFT programs with a
+(16,16), (18,6), and (32,32)) run generated Lin-Chung-Han FFT programs with a
 fraction of the schoolbook multiplies, fully register-resident on NEON, on
-GFNI hosts (64-byte strips where AVX-512 is present), and on wasm simd128.
+GFNI hosts (64-byte strips where AVX-512 is present), on any AVX2 host through
+the nibble executor, and on wasm simd128.
 The coverage policy costs one line per shape: every shape that ships gets
 added to the generator list and registered, and the byte-identity tests do
 the rest. Any other shape is compiled at construction into a staged FFT
@@ -128,10 +133,11 @@ reports the choice for a given shard length.
 | wasm32  | simd128 (under `+simd128`)                | `src/gf/wasm128.rs`     |
 | other   | scalar                                    | `src/gf/scalar.rs`      |
 
-The GF(2^16) coder adds one kernel of its own, the fused Karatsuba tower kernel
-at `src/gf/tower_neon.rs` on aarch64, plus staged FFT executors at
-`src/gf/fft16_neon.rs` and `src/gf/fft16_x86.rs`. Every other target reuses the
-byte kernels above through the expanded generator.
+The GF(2^16) coder adds its own fused Karatsuba tower kernel, at
+`src/gf/tower_neon.rs` on aarch64 and `src/gf/tower_x86.rs` on x86, plus staged
+FFT executors at `src/gf/fft16_neon.rs` and `src/gf/fft16_x86.rs` (the x86 one
+runs a GFNI affine core or an AVX2 nibble core per host). Every other target
+reuses the byte kernels above through the expanded generator.
 
 ## Cargo features
 

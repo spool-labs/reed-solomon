@@ -69,23 +69,40 @@ fn what() -> &'static [Vec<u16>] {
 /// Whether a compiled program should carry this shape's encode over the
 /// fused matrix kernels.
 ///
-/// Measured at 4 MiB shards by `gf16-bench --bin sweep`: on aarch64 the
-/// compiled program beat the matrix tiles at every tested shape, down to
-/// (7,13), so any program that fits the executors routes to it. On x86 the
-/// GFNI affine tiles do one coefficient multiply about 4.5x cheaper than one
-/// butterfly, which keeps the smallest shapes on the matrix; the knife-edge
-/// shapes on Zen 5 sit exactly where the multiply-count rule predicts,
-/// (11,20) at ratio 4.1 to the matrix and (17,33) at 5.0 to the FFT.
+/// The routing is per-host, which is sound because the two paths are
+/// byte-identical (guarded by the wire tests), so different nodes may route
+/// differently with no consensus effect.
+///
+/// - aarch64: the compiled program beat the matrix tiles at every tested shape
+///   down to (7,13), so any program that fits routes to it.
+/// - x86 with GFNI: one affine coefficient multiply is far cheaper than one
+///   butterfly, so the smallest shapes stay on the matrix; the multiply-count
+///   rule is the measured Zen 5 crossover ((11,20) matrix, (17,33) FFT).
+/// - x86 without GFNI: both paths are `vpshufb` nibble kernels, so the matrix's
+///   O(k*m) has nothing to hide behind and the nibble FFT wins at every
+///   snapshot shape measured (1.1x at (7,13), 10-20x at the outer shapes). Route
+///   to the FFT whenever it fits. Verified on a real AVX2/no-GFNI Xeon.
 pub(crate) fn profitable(
     program: &StagedProgram16,
     data_shards: usize,
     parity_shards: usize,
 ) -> bool {
+    // A program that overflows the executors can never route to the FFT.
+    if program.register_count > MAX_STAGED_REGISTERS16 {
+        return false;
+    }
     // cfg! rather than #[cfg] keeps the shape arguments live on every target,
     // so the aarch64 arm still folds away without a lint suppression.
-    program.register_count <= MAX_STAGED_REGISTERS16
-        && (cfg!(target_arch = "aarch64")
-            || 9 * program.mult_count < 2 * data_shards * parity_shards)
+    if cfg!(target_arch = "aarch64") {
+        return true;
+    }
+    // On x86 the matrix rule only holds where GFNI makes the affine tiles cheap;
+    // without it the nibble FFT wins outright.
+    #[cfg(gf16_x86_enabled)]
+    if !crate::gf::fft16_x86::available() {
+        return true;
+    }
+    9 * program.mult_count < 2 * data_shards * parity_shards
 }
 
 /// One field operation over the virtual register file.
@@ -891,11 +908,17 @@ pub(crate) fn encode<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
 
     #[cfg(not(gf16_neon_enabled))]
     {
-        // The GFNI executor when the host has it, otherwise the portable
-        // strip arena; symbol replay only for sub-strip shards.
+        // The GFNI executor when the host has it, then the AVX2 nibble executor
+        // for GFNI-less hosts, and only then the portable strip arena; symbol
+        // replay for sub-strip shards.
         #[cfg(gf16_x86_enabled)]
         if plane >= 16 && crate::gf::fft16_x86::available() {
             crate::gf::fft16_x86::encode_staged16(program, data, parity);
+            return;
+        }
+        #[cfg(gf16_x86_enabled)]
+        if plane >= 16 && crate::gf::fft16_x86::available_nibble() {
+            crate::gf::fft16_x86::encode_staged16_nibble(program, data, parity);
             return;
         }
         if plane >= 64 {
@@ -967,6 +990,41 @@ mod tests {
                     .map(|&reg| registers[reg as usize])
                     .collect();
                 assert_eq!(got, oracle(k, m, &symbols), "k={k} m={m}");
+            }
+        }
+    }
+
+    // The AVX2 nibble executor must match the symbol-by-symbol reference. Runs
+    // only where AVX2 is present (not under Rosetta), so on a real GFNI-less x86
+    // host this is the gate on the fallback that used to be the scalar arena.
+    // Plane lengths cross the 32-byte vector width, the STRIP boundary, and the
+    // backed-up final block.
+    #[cfg(gf16_x86_enabled)]
+    #[test]
+    fn nibble_executor_matches_symbolwise() {
+        if !crate::gf::fft16_x86::available_nibble() {
+            return;
+        }
+        let shapes = [(2usize, 2usize), (7, 13), (10, 20), (16, 16), (17, 33), (86, 170)];
+        let mut seed = 0x5EED_16_A2u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 24) as u8
+        };
+        for &(k, m) in &shapes {
+            let program = build_staged_program16(k, m);
+            for &plane in &[16usize, 40, 100, 512, 700] {
+                let shard = 2 * plane;
+                let data: Vec<Vec<u8>> =
+                    (0..k).map(|_| (0..shard).map(|_| next()).collect()).collect();
+
+                let mut got = vec![vec![0u8; shard]; m];
+                crate::gf::fft16_x86::encode_staged16_nibble(&program, &data, &mut got);
+
+                let mut want = vec![vec![0u8; shard]; m];
+                encode_symbolwise(&program, &data, &mut want);
+
+                assert_eq!(got, want, "k={k} m={m} plane={plane}");
             }
         }
     }

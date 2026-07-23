@@ -6,7 +6,8 @@
 
 #[cfg(any(
     all(target_arch = "aarch64", not(feature = "scalar")),
-    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")),
+    gf16_x86_enabled
 ))]
 use crate::galois::MUL_TABLE;
 
@@ -31,13 +32,15 @@ use super::{mul_slice, mul_slice_xor};
 /// GF(2^8) FFT cores and the GF((2^8)^2) tower core.
 #[cfg(any(
     all(target_arch = "aarch64", not(feature = "scalar")),
-    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")),
+    gf16_x86_enabled
 ))]
 pub(crate) static NIBBLE_PAIRS: [[u8; 32]; 256] = gen_nibble_pairs();
 
 #[cfg(any(
     all(target_arch = "aarch64", not(feature = "scalar")),
-    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")),
+    gf16_x86_enabled
 ))]
 const fn gen_nibble_pairs() -> [[u8; 32]; 256] {
     let mul = crate::galois::gen_mul_table();
@@ -63,7 +66,9 @@ const fn gen_nibble_pairs() -> [[u8; 32]; 256] {
 /// `MUL_TABLE` row also turns 32 double-indexed lookups into one row lookup.
 #[cfg(any(
     all(target_arch = "aarch64", not(feature = "scalar")),
-    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar"))
+    all(target_arch = "wasm32", target_feature = "simd128", not(feature = "scalar")),
+    // The x86 Karatsuba tower kernel indexes the same pshufb-shaped pair.
+    gf16_x86_enabled
 ))]
 pub(crate) fn nibble_pair(coefficient: u8) -> [u8; 32] {
     let product_row = &MUL_TABLE[coefficient as usize];

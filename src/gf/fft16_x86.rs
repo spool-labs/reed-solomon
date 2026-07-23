@@ -22,20 +22,28 @@ use crate::gf::gfni::AFFINE;
 /// zmm core moves 64 bytes per load and wants the longer run to amortize it.
 const STRIP: usize = 512;
 
-/// The vector operations one core needs, implemented per register width.
+/// The vector operations one core needs, over a register width and a GF(2^8)
+/// constant-multiply. The multiply is abstracted as prepare-then-apply so the
+/// same butterfly logic drives both the GFNI affine engines and the AVX2
+/// nibble-table engine for hosts without GFNI; the prepared form differs
+/// (`Mat`), the butterflies do not.
 trait Vec8: Copy {
     const WIDTH: usize;
+    /// The prepared multiply-by-constant form: a broadcast affine matrix for
+    /// GFNI, a broadcast nibble table pair for pshufb.
+    type Mat: Copy;
     unsafe fn load(p: *const u8) -> Self;
     unsafe fn store(p: *mut u8, v: Self);
     unsafe fn xor(a: Self, b: Self) -> Self;
-    /// Broadcast the affine matrix of multiply-by-`c`.
-    unsafe fn matrix(c: u8) -> Self;
-    /// `matrix * v` per byte through gf2p8affineqb.
-    unsafe fn affine(v: Self, m: Self) -> Self;
+    /// Prepare multiply-by-`c` (a GF(2^8) byte constant).
+    unsafe fn matrix(c: u8) -> Self::Mat;
+    /// Multiply every byte lane of `v` by the constant `m` prepares.
+    unsafe fn affine(v: Self, m: Self::Mat) -> Self;
 }
 
 impl Vec8 for __m256i {
     const WIDTH: usize = 32;
+    type Mat = Self;
 
     #[inline(always)]
     unsafe fn load(p: *const u8) -> Self {
@@ -65,6 +73,7 @@ impl Vec8 for __m256i {
 
 impl Vec8 for __m512i {
     const WIDTH: usize = 64;
+    type Mat = Self;
 
     #[inline(always)]
     unsafe fn load(p: *const u8) -> Self {
@@ -89,6 +98,57 @@ impl Vec8 for __m512i {
     #[inline(always)]
     unsafe fn affine(v: Self, m: Self) -> Self {
         _mm512_gf2p8affine_epi64_epi8::<0>(v, m)
+    }
+}
+
+/// AVX2 nibble-table engine: a `__m256i` newtype so it can carry its own
+/// multiply without colliding with the affine `impl` above. Multiply-by-`c` is
+/// the standard split-nibble `vpshufb` pair, `lo[x] = c*x` and `hi[x] = c*(x<<4)`
+/// broadcast to both 128-bit lanes, so it needs only AVX2 and covers every
+/// GFNI-less x86 host that used to fall back to the scalar arena.
+#[derive(Clone, Copy)]
+struct Nibble(__m256i);
+
+impl Vec8 for Nibble {
+    const WIDTH: usize = 32;
+    /// `(lo_table, hi_table)`, each the 16-byte table broadcast to both lanes.
+    type Mat = (__m256i, __m256i);
+
+    #[inline(always)]
+    unsafe fn load(p: *const u8) -> Self {
+        Nibble(_mm256_loadu_si256(p as *const __m256i))
+    }
+
+    #[inline(always)]
+    unsafe fn store(p: *mut u8, v: Self) {
+        _mm256_storeu_si256(p as *mut __m256i, v.0)
+    }
+
+    #[inline(always)]
+    unsafe fn xor(a: Self, b: Self) -> Self {
+        Nibble(_mm256_xor_si256(a.0, b.0))
+    }
+
+    #[inline(always)]
+    unsafe fn matrix(c: u8) -> Self::Mat {
+        // Index the compile-time table so a butterfly's constant costs two loads
+        // and two broadcasts, not a fresh per-call table build.
+        let t = crate::gf::tables::NIBBLE_PAIRS[c as usize].as_ptr();
+        (
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t as *const __m128i)),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t.add(16) as *const __m128i)),
+        )
+    }
+
+    #[inline(always)]
+    unsafe fn affine(v: Self, m: Self::Mat) -> Self {
+        let mask = _mm256_set1_epi8(0x0f);
+        let lo_idx = _mm256_and_si256(v.0, mask);
+        let hi_idx = _mm256_and_si256(_mm256_srli_epi16::<4>(v.0), mask);
+        Nibble(_mm256_xor_si256(
+            _mm256_shuffle_epi8(m.0, lo_idx),
+            _mm256_shuffle_epi8(m.1, hi_idx),
+        ))
     }
 }
 
@@ -256,6 +316,13 @@ pub(crate) fn available() -> bool {
     std::is_x86_feature_detected!("gfni") && std::is_x86_feature_detected!("avx2")
 }
 
+/// Whether the AVX2 nibble executor can run. This is the fallback for hosts
+/// without GFNI, which before this ran the FFT on the scalar arena.
+#[inline]
+pub(crate) fn available_nibble() -> bool {
+    std::is_x86_feature_detected!("avx2")
+}
+
 /// Encode a shape through its staged program.
 ///
 /// Shards are plane pairs `[low N | high N]` of one even length with
@@ -280,6 +347,22 @@ pub(crate) fn encode_staged16<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     }
 }
 
+/// Encode through the AVX2 nibble executor, for hosts without GFNI. Same shard
+/// contract as [`encode_staged16`]; the caller checked [`available_nibble`].
+pub(crate) fn encode_staged16_nibble<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    program: &StagedProgram16,
+    data: &[In],
+    parity: &mut [Out],
+) {
+    debug_assert_eq!(parity.len(), program.parity_regs.len());
+    debug_assert!(program.register_count <= MAX_STAGED_REGISTERS16);
+    debug_assert!(data[0].as_ref().len() / 2 >= 16);
+    debug_assert!(available_nibble());
+    // SAFETY: avx2 checked by the caller through `available_nibble`; counts and
+    // lengths are the caller's contract, checked above in debug builds.
+    unsafe { staged_core_nibble(program, data, parity) }
+}
+
 #[target_feature(enable = "gfni,avx2")]
 unsafe fn staged_core_ymm<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     program: &StagedProgram16,
@@ -287,6 +370,15 @@ unsafe fn staged_core_ymm<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
     parity: &mut [Out],
 ) {
     staged_core_impl::<__m256i, In, Out>(program, data, parity)
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn staged_core_nibble<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
+    program: &StagedProgram16,
+    data: &[In],
+    parity: &mut [Out],
+) {
+    staged_core_impl::<Nibble, In, Out>(program, data, parity)
 }
 
 #[target_feature(enable = "gfni,avx512f,avx512bw")]
