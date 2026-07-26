@@ -820,6 +820,75 @@ pub(crate) fn run_staged_bytes(program: &StagedProgram, data: &[u8]) -> Vec<u8> 
 mod tests {
     use super::*;
 
+    // program cost for shapes we might generate, against the schoolbook product
+    // they have to beat:
+    //   cargo test shape_stats -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn shape_stats() {
+        let shapes = [
+            (7usize, 13usize, "generated"),
+            (10, 10, "generated"),
+            (14, 14, "generated"),
+            (16, 16, "generated"),
+            (18, 6, "generated"),
+            (32, 32, "generated"),
+            (17, 33, "tapedrive outer, 50 groups"),
+            (34, 66, "tapedrive outer, 100 groups"),
+            (7, 13, "tapedrive outer, 20 groups"),
+            (4, 8, "tapedrive outer, 10 groups"),
+            (9, 17, "tapedrive outer, 26 groups"),
+        ];
+
+        for (k, m, note) in shapes {
+            let program = build_encode_program(k, m);
+            println!(
+                "({k:>2},{m:>2}) {:>3} regs {:>4} ops {:>4} mults  vs schoolbook {:>5}  {note}",
+                program.register_count,
+                program.ops.len(),
+                program.mult_count,
+                k * m,
+            );
+        }
+    }
+
+    // Encode throughput per generated shape at a large shard, against the
+    // program's own cost. Register count does not predict this; total shard
+    // count does, because the strip loop keeps one stream open per shard.
+    //   cargo test shape_throughput -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn shape_throughput() {
+        use crate::ReedSolomon;
+        use std::time::Instant;
+
+        const LEN: usize = 4 * 1024 * 1024;
+        println!("{:>8} {:>5} {:>6} {:>10} {:>12}", "shape", "regs", "mults", "ms", "ns/mult/MiB");
+
+        for &(k, m) in crate::fft_programs::GENERATED_SHAPES {
+            let program = build_encode_program(k, m);
+            let rs = ReedSolomon::new(k, m).unwrap();
+            let mut shards: Vec<Vec<u8>> = (0..k + m)
+                .map(|i| vec![if i < k { (i % 251) as u8 } else { 0 }; LEN])
+                .collect();
+
+            rs.encode(&mut shards).unwrap();
+            let start = Instant::now();
+            for _ in 0..3 {
+                rs.encode(&mut shards).unwrap();
+            }
+            let ms = start.elapsed().as_secs_f64() * 1000.0 / 3.0;
+
+            let per = ms * 1e6 / (program.mult_count as f64 * (LEN / (1024 * 1024)) as f64);
+            println!(
+                "{:>8} {:>5} {:>6} {ms:>10.2} {per:>12.1}",
+                format!("({k},{m})"),
+                program.register_count,
+                program.mult_count,
+            );
+        }
+    }
+
     // regenerates src/fft_programs.rs; run after changing the builder:
     //   cargo test dump_programs -- --ignored --nocapture
     #[test]
@@ -836,6 +905,7 @@ mod tests {
             (10, 10, "10_10"),
             (14, 14, "14_14"),
             (16, 16, "16_16"),
+            (17, 33, "17_33"), // Tapedrive outer coding at 50 spool groups
             (18, 6, "18_6"),
             (32, 32, "32_32"), // Agave shred FEC shape, 987-byte shards
         ];
