@@ -889,6 +889,156 @@ mod tests {
         }
     }
 
+    // Where does encode throughput fall off, and is it driven by how much data
+    // is live or by how many shards are open at once? The first sweep varies
+    // shard length per shape; the second holds the working set fixed and varies
+    // only the shard count.
+    //   cargo test streaming_limits -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn streaming_limits() {
+        use crate::ReedSolomon;
+        use std::time::Instant;
+
+        fn bytes_per_sec(k: usize, m: usize, len: usize) -> f64 {
+            let rs = ReedSolomon::new(k, m).unwrap();
+            let mut shards: Vec<Vec<u8>> = (0..k + m)
+                .map(|i| vec![if i < k { (i % 251) as u8 } else { 0 }; len])
+                .collect();
+            rs.encode(&mut shards).unwrap();
+
+            let reps = (64 * 1024 * 1024 / ((k + m) * len)).clamp(3, 200);
+            let start = Instant::now();
+            for _ in 0..reps {
+                rs.encode(&mut shards).unwrap();
+            }
+            let secs = start.elapsed().as_secs_f64() / reps as f64;
+            ((k + m) * len) as f64 / secs
+        }
+
+        println!("sweep shard length, per shape");
+        println!("{:>8} {:>10} {:>10} {:>9}", "shape", "len", "live", "GB/s");
+        for &(k, m) in &[(10usize, 10usize), (16, 16), (17, 33), (32, 32)] {
+            for len in [4 * 1024usize, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024] {
+                let live = (k + m) * len;
+                let gbs = bytes_per_sec(k, m, len) / 1e9;
+                println!(
+                    "{:>8} {:>10} {:>10} {gbs:>9.2}",
+                    format!("({k},{m})"),
+                    len,
+                    live,
+                );
+            }
+        }
+
+        // Same bytes live, different shard counts. If GB/s still falls, the
+        // cost is the number of open streams and not the working set.
+        println!();
+        println!("fixed 64 MiB live, varying shard count");
+        println!("{:>8} {:>7} {:>10} {:>9}", "shape", "shards", "len", "GB/s");
+        for &(k, m) in &[(10usize, 10usize), (16, 16), (17, 33), (32, 32)] {
+            let n = k + m;
+            let len = (64 * 1024 * 1024 / n) & !63;
+            let gbs = bytes_per_sec(k, m, len) / 1e9;
+            println!("{:>8} {n:>7} {len:>10} {gbs:>9.2}", format!("({k},{m})"));
+        }
+
+        // Cost of one program op, at a length that stays in cache so memory is
+        // out of the picture. A flat number here would mean the shapes differ
+        // only in how much work they do; a rising one means the bigger programs
+        // issue fewer ops per cycle, which is a scheduling property.
+        println!();
+        println!("in-cache cost per program op, 16 KiB shards");
+        println!("{:>8} {:>6} {:>10} {:>12}", "shape", "ops", "ns/strip", "ns/op");
+        const LEN: usize = 16 * 1024;
+        for &(k, m) in crate::fft_programs::GENERATED_SHAPES {
+            let program = build_encode_program(k, m);
+            let secs = ((k + m) * LEN) as f64 / bytes_per_sec(k, m, LEN);
+            let strips = (LEN / 16) as f64;
+            let per_strip = secs * 1e9 / strips;
+            println!(
+                "{:>8} {:>6} {per_strip:>10.1} {:>12.3}",
+                format!("({k},{m})"),
+                program.ops.len(),
+                per_strip / program.ops.len() as f64,
+            );
+        }
+    }
+
+    // Reads and writes are not symmetric: a strip writes 16 bytes into each of
+    // m separate lines, so a line takes four partial writes with every other
+    // output touched in between. Shapes here share n, and so share stream count
+    // and roughly share work, differing only in how n splits into k and m. All
+    // run the fused path so the generated executors cannot skew it.
+    //   cargo test read_write_asymmetry -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn read_write_asymmetry() {
+        use crate::ReedSolomon;
+        use std::time::Instant;
+
+        const LEN: usize = 16 * 1024;
+        println!("{:>8} {:>4} {:>4} {:>10} {:>10}", "shape", "k", "m", "ns/strip", "GB/s");
+
+        for &(k, m) in &[(33usize, 17usize), (25, 25), (17, 33), (43, 7), (7, 43)] {
+            let rs = ReedSolomon::new(k, m).unwrap();
+            let mut shards: Vec<Vec<u8>> = (0..k + m)
+                .map(|i| vec![if i < k { (i % 251) as u8 } else { 0 }; LEN])
+                .collect();
+
+            rs.encode_fused(&mut shards).unwrap();
+            let start = Instant::now();
+            for _ in 0..50 {
+                rs.encode_fused(&mut shards).unwrap();
+            }
+            let secs = start.elapsed().as_secs_f64() / 50.0;
+
+            println!(
+                "{:>8} {k:>4} {m:>4} {:>10.1} {:>10.2}",
+                format!("({k},{m})"),
+                secs * 1e9 / (LEN / 16) as f64,
+                ((k + m) * LEN) as f64 / secs / 1e9,
+            );
+        }
+    }
+
+    // How much of each program can issue in parallel? Depth is the longest
+    // dependency chain through the register file, so ops/depth is the width the
+    // machine could exploit if the ops were scheduled for it. A program emitted
+    // in strict transform order can have far less usable parallelism than its
+    // op count suggests.
+    //   cargo test program_parallelism -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn program_parallelism() {
+        println!("{:>8} {:>6} {:>7} {:>7} {:>9}", "shape", "ops", "depth", "width", "ns/op");
+
+        for &(k, m) in crate::fft_programs::GENERATED_SHAPES {
+            let program = build_encode_program(k, m);
+
+            // Depth of every register after replaying the ops in emitted order.
+            let mut depth = vec![0usize; program.register_count];
+            for op in &program.ops {
+                let (dst, src) = match *op {
+                    FftOp::MulXor { dst, src, .. } | FftOp::Xor { dst, src } => (dst, src),
+                    FftOp::MulCopy { dst, src, .. } | FftOp::Copy { dst, src } => (dst, src),
+                };
+                let (dst, src) = (dst as usize, src as usize);
+                depth[dst] = depth[dst].max(depth[src]) + 1;
+            }
+
+            let critical = depth.iter().copied().max().unwrap_or(0);
+            println!(
+                "{:>8} {:>6} {:>7} {:>7.2} {:>9}",
+                format!("({k},{m})"),
+                program.ops.len(),
+                critical,
+                program.ops.len() as f64 / critical.max(1) as f64,
+                "",
+            );
+        }
+    }
+
     // regenerates src/fft_programs.rs; run after changing the builder:
     //   cargo test dump_programs -- --ignored --nocapture
     #[test]
