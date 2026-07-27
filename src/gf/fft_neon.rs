@@ -10,9 +10,9 @@ use core::arch::aarch64::*;
 
 use crate::fft::{FftOp, StagedProgram, StagedStage, MAX_STAGED_REGISTERS};
 use crate::fft_programs::{
-    fft_program_10_10, fft_program_14_14, fft_program_16_16, fft_program_18_6,
+    fft_program_10_10, fft_program_14_14, fft_program_16_16, fft_program_17_33, fft_program_18_6,
     fft_program_32_32, fft_program_7_13, FFT_REGS_10_10, FFT_REGS_14_14, FFT_REGS_16_16,
-    FFT_REGS_18_6, FFT_REGS_32_32, FFT_REGS_7_13,
+    FFT_REGS_17_33, FFT_REGS_18_6, FFT_REGS_32_32, FFT_REGS_7_13,
 };
 
 /// Strip width in bytes, one NEON vector
@@ -172,6 +172,7 @@ fft_executor!(encode_7_13, core_7_13, core_7_13_sha3, fft_program_7_13, FFT_REGS
 fft_executor!(encode_10_10, core_10_10, core_10_10_sha3, fft_program_10_10, FFT_REGS_10_10, 10, 10);
 fft_executor!(encode_14_14, core_14_14, core_14_14_sha3, fft_program_14_14, FFT_REGS_14_14, 14, 14);
 fft_executor!(encode_16_16, core_16_16, core_16_16_sha3, fft_program_16_16, FFT_REGS_16_16, 16, 16);
+fft_executor!(encode_17_33, core_17_33, core_17_33_sha3, fft_program_17_33, FFT_REGS_17_33, 17, 33);
 fft_executor!(encode_18_6, core_18_6, core_18_6_sha3, fft_program_18_6, FFT_REGS_18_6, 18, 6);
 fft_executor!(encode_32_32, core_32_32, core_32_32_sha3, fft_program_32_32, FFT_REGS_32_32, 32, 32);
 /// Shard length that can ride the FFT path: at least one full strip
@@ -201,6 +202,7 @@ pub(crate) fn encode_generated<In: AsRef<[u8]>, Out: AsMut<[u8]>>(
         (10, 10) => encode_10_10(data, parity),
         (14, 14) => encode_14_14(data, parity),
         (16, 16) => encode_16_16(data, parity),
+        (17, 33) => encode_17_33(data, parity),
         (18, 6) => encode_18_6(data, parity),
         (32, 32) => encode_32_32(data, parity),
         _ => return false,

@@ -941,12 +941,40 @@ mod tests {
         assert_eq!(buffer, expected);
     }
 
+    /// Every generated shape, plus runtime shapes covering the staged and
+    /// fused paths. `every_generated_shape_is_covered` keeps the first part
+    /// honest, so a new generated shape cannot ship without a correctness test.
+    const COVERED_SHAPES: &[(usize, usize)] = &[
+        (7, 13),
+        (10, 10),
+        (14, 14),
+        (16, 16),
+        (17, 33),
+        (18, 6),
+        (32, 32),
+        (20, 10),
+        (4, 2),
+        (6, 4),
+        (17, 17),
+    ];
+
+    #[cfg(fft_enabled)]
+    #[test]
+    fn every_generated_shape_is_covered() {
+        for shape in crate::fft_programs::GENERATED_SHAPES {
+            assert!(
+                COVERED_SHAPES.contains(shape),
+                "generated shape {shape:?} has no correctness test, add it to COVERED_SHAPES"
+            );
+        }
+    }
+
     #[test]
     fn encode_fused_matches_encode() {
         // Fused encode must be byte-identical to the per-shard encode at the
         // production shapes and a spread of shard sizes, including tail lengths
         // and both FFT strip boundaries.
-        for &(k, m) in &[(7usize, 13usize), (10, 10), (20, 10), (4, 2), (6, 4), (17, 17)] {
+        for &(k, m) in COVERED_SHAPES {
             let rs = ReedSolomon::new(k, m).unwrap();
             for &len in &[1usize, 15, 16, 17, 31, 32, 63, 100, 1024, 10000, 65536] {
                 let data = deterministic_data(k * len, 0x9E37_79B9);
