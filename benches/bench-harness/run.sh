@@ -5,10 +5,10 @@
 # reed-solomon-erasure(+simd-accel, C AVX2), then you DELETE the node.
 #
 # Copy the WHOLE tape-reed-solomon crate to the node first (this harness path-deps
-# `..`), e.g.:
+# `../..`), e.g.:
 #   gcloud compute scp --recurse tape-reed-solomon rs-test-tmp:~  --zone=<z>
 #   gcloud compute ssh rs-test-tmp --zone=<z> \
-#     --command="cd tape-reed-solomon/bench-harness && bash run.sh"
+#     --command="cd tape-reed-solomon/benches/bench-harness && bash run.sh"
 # Provision/delete per TAPE-RS-PLAN.md (labels=purpose=rs-gate-ephemeral; always delete).
 set -euo pipefail
 cd "$(dirname "$0")"

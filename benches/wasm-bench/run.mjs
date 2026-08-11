@@ -1,6 +1,6 @@
 // wasm simd128 encode bench + differential (Node 24). Build first:
-//   RUSTFLAGS="-C target-feature=+simd128" wasm-pack build wasm-bench --target nodejs --release
-// then: node wasm-bench/run.mjs
+//   RUSTFLAGS="-C target-feature=+simd128" wasm-pack build benches/wasm-bench --target nodejs --release
+// then: node benches/wasm-bench/run.mjs
 import { setup, run_fused, run_scalar, run_reconstruct, verify, verify_reconstruct } from './pkg/wasm_bench.js';
 
 // Differential first: fused `encode` must equal `encode_scalar` byte-for-byte.

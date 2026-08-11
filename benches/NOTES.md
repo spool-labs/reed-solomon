@@ -1,18 +1,25 @@
-# tape-reed-solomon: encode benchmarks
+# Benchmark research notes
 
-Two benchmarks answer two different questions:
+This is the chronological optimization and measurement record for
+`tape-reed-solomon`. It includes superseded results, corrected assumptions, and
+implementation rationale. See [BENCHMARKS.md](../BENCHMARKS.md) for the curated
+current results.
+
+## Context
+
+Two harnesses answer different questions:
 
 - **Correctness / wire-compat** lives in the crate (`tests/parity.rs`) and diffs the
   pure-Rust **scalar** `reed-solomon-erasure`, so it needs no C toolchain and runs anywhere.
-- **Performance** lives in `bench-harness/` (a standalone package, *not* a crate
+- **Performance** lives in `benches/bench-harness/` (a standalone package, *not* a crate
   dependency). It benchmarks against rse **+`simd-accel`** (the C SIMD backend that
   ships in production on native) and against **`sia_reed_solomon`**.
 
-Speedups are vs the **C-accelerated** rse (the real native delta, not the misleading
-scalar-rse number). This doc leads with the current state; the run-by-run record,
-including corrections to earlier claims, is the **History** log at the bottom.
+Speedups are against C-accelerated rse, not its scalar implementation. The
+snapshot below anchors the chronological record and may be superseded by the
+curated results in [`BENCHMARKS.md`](../BENCHMARKS.md).
 
-## Current state (2026-07-19)
+## Recorded state (2026-07-19)
 
 **Encode routing.** Every shape picks one of three byte-identical routes, all
 interpolating through points 0..k-1 and evaluating at k..n-1 (exactly what the
@@ -101,15 +108,16 @@ because **the production system parallelises across stripes upstream**, so threa
 
 ## Reproduce
 
-- **Native / NEON, local:** `cd bench-harness && cargo run --release`.
+- **Native / NEON, local:**
+  `cargo run --release --manifest-path benches/bench-harness/Cargo.toml`.
 - **wasm simd128, local:** build with
-  `RUSTFLAGS="-C target-feature=+simd128" wasm-pack build wasm-bench --target nodejs --release`,
-  then `node wasm-bench/run.mjs` under Node 24. The differential `verify()` (fused ==
+  `RUSTFLAGS="-C target-feature=+simd128" wasm-pack build benches/wasm-bench --target nodejs --release`,
+  then `node benches/wasm-bench/run.mjs` under Node 24. The differential `verify()` (fused ==
   scalar across generated, staged, and fused shapes and tail lengths) and the
   reconstruct gate run first and gate the bench.
-- **x86 GFNI / AVX-512, GCP:** `bench-harness/run.sh` runs the single-thread
+- **x86 GFNI / AVX-512, GCP:** `benches/bench-harness/run.sh` runs the single-thread
   head-to-head (tape's dispatched + fused + FFT kernels vs sia vs rse +simd-accel),
-  and `fd-bench/run.sh` adds the firedancer C-FFI comparison. Machine types by µarch:
+  and `benches/fd-bench/run.sh` adds the firedancer C-FFI comparison. Machine types by µarch:
   `c3-standard-4` (Intel Sapphire Rapids, GFNI+AVX-512), `c3d-standard-4` (Zen 4
   Genoa, GFNI), `c4d-standard-4` (Zen 5 Turin, GFNI), `t2d`/`c2d-standard-4` (Zen 3
   Milan, AVX2-only, exercises the fused AVX2 path). Runtime dispatch means running

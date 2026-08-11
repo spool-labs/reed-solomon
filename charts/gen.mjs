@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // One chart: tape's speedup over firedancer, one line per shape, across shard
-// size, from the x86 Zen 5 Turin flagship numbers (BENCH-RESULTS.md).
+// size, from the x86 Zen 5 Turin flagship numbers (BENCHMARKS.md).
 //
 // Dependency-free. Emits charts/speedup.svg (renders directly in a GitHub
 // README via <img>) plus charts/index.html for local preview. Regenerate:
